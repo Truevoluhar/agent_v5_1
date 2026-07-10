@@ -1,0 +1,18 @@
+agents_resources: resources/agents
+workspace: agent_workspace
+max_steps: 5
+
+orchestrator_agent:
+  name: ORCHESTRATOR
+  model: gpt-4.1-mini
+  temperature: 0.2
+  base_url: https://api.openai.com/v1
+  api_key: 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
+
+agents:
+  agent_001:
+    name: PROGRAMMER
+    model: gpt-4.1-mini
+    temperature: 0.2
+    base_url: https://api.openai.com/v1
+    api_key: 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

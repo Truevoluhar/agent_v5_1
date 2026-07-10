@@ -1,0 +1,14 @@
+[project]
+name = "agentv5"
+version = "0.0.1"
+
+[project.scripts]
+agentv5 = "agent.cli:main"
+
+[tool.pytest.ini_options]
+pytonpath = ["."]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent*"]
+exclude = ["resources*"]

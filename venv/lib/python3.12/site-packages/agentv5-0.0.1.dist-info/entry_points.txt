@@ -1,0 +1,2 @@
+[console_scripts]
+agentv5 = agent.cli:main
