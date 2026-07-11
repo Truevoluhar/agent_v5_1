@@ -5,6 +5,7 @@ import yaml
 
 from agent.generic_agent import GenericAgent
 from agent.orchestrator_agent import OrchestratorAgent, TestSessionItem
+from agent.session import Session
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,7 @@ CONFIG_PATH = str(AGENT_ROOT / "config.yml")
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("initial_prompt", help="First prompt where you describe what you want to do with agent.")
+    parser.add_argument("--initial_prompt", help="First prompt where you describe what you want to do with agent.")
 
     parser.add_argument(
         "--workspace",
@@ -43,6 +44,10 @@ def main():
     agent_resources = str(PROJECT_ROOT / config['agents_resources' ])
 
 
+    # INSTANCIRAMO NOV SESSION
+    session = Session()
+
+    
 
     # INSTANCIRAMO GENERIČNE AGENTE
     agents: list[GenericAgent] = []
@@ -81,6 +86,9 @@ def main():
     messages = [
             { "role": "user", "content": args.initial_prompt }
     ]
+    session.add_message(messages[0])
+
+    
 
     # AGENT LOOP
     for step in range(config["max_steps"]):
@@ -88,26 +96,21 @@ def main():
         
         
         orchestrator_response: TestSessionItem = orchestrator_agent.chat_structured(
-            messages=messages,
+            messages=session.messages,
             response_model=TestSessionItem,
         )
-        messages.append(
-            { "role": "assistant", "content": orchestrator_response.description }
-        )
+        
+        session.add_message({ "role": "assistant", "content": orchestrator_response.description })
 
         if orchestrator_response.action == "delegate_to_agent":
             for agent in agents:
                 if agent.name == orchestrator_response.agent_name:
-                    agent_response = agent.chat(messages)
-                    messages.append(
-                        { "role": "assistant", "content": agent_response }
-                    )
+                    agent_response = agent.chat(session.messages)
+                    session.add_message({ "role": "assistant", "content": agent_response })
 
         if orchestrator_response.action == "ask_user":
             user_response = input("Respond to agent: ")
-            messages.append(
-                { "role": "user", "content": user_response }
-            )
+            session.add_message({ "role": "user", "content": user_response })
 
         if orchestrator_response.action == "finish":
             return

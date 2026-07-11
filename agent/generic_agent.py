@@ -82,11 +82,16 @@ class GenericAgent:
         tools = get_tool_schemas()
 
         msgs = list(messages)
+
+        request_messages = [
+            {"role": "system", "content": self.system_message },
+            *msgs
+        ]
         
         for _ in range(10):
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=msgs,
+                messages=request_messages,
                 temperature=self.temperature,
                 timeout=None,
                 tool_choice="auto",
@@ -96,7 +101,7 @@ class GenericAgent:
             message = response.choices[0].message
             # print(message)
 
-            msgs.append(message)
+            request_messages.append(message)
 
             if message.tool_calls:
                 for tool_call in message.tool_calls:
@@ -110,7 +115,7 @@ class GenericAgent:
                         tool_input=arguments
                     )
 
-                    msgs.append({
+                    request_messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": json.dumps(

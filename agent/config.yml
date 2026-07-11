@@ -1,13 +1,13 @@
 agents_resources: resources/agents
 workspace: agent_workspace
-max_steps: 5
+max_steps: 100
 
 orchestrator_agent:
   name: ORCHESTRATOR
   model: gpt-4.1-mini
   temperature: 0.2
   base_url: https://api.openai.com/v1
-  api_key: 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
+  api_key: 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
 
 agents:
   agent_001:
@@ -15,4 +15,4 @@ agents:
     model: gpt-4.1-mini
     temperature: 0.2
     base_url: https://api.openai.com/v1
-    api_key: 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
+    api_key: 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
