@@ -1,7 +1,9 @@
+import os
 import argparse
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 
 from agent.generic_agent import GenericAgent
 from agent.orchestrator_agent import OrchestratorAgent, TestSessionItem
@@ -32,6 +34,9 @@ def main():
 
     args = parser.parse_args()
 
+    # Naložimo okoljske spremenljivke iz .env datoteke
+    load_dotenv()
+
 
     # CONFIG LOAD
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -59,7 +64,7 @@ def main():
             model=agent_data['model'],
             temperature=agent_data['temperature'],
             base_url=agent_data['base_url'],
-            api_key=agent_data['api_key'],
+            api_key=os.getenv(agent_data['api_key']),
             resources_path=agent_resources
         )
         agents.append(agent)
@@ -77,7 +82,7 @@ def main():
         model=orchestrator_config['model'],
         temperature=orchestrator_config['temperature'],
         base_url=orchestrator_config['base_url'],
-        api_key=orchestrator_config['api_key'],
+        api_key=os.getenv(orchestrator_config['api_key']),
         resources_path=agent_resources,
         available_agents=available_agents
     )
