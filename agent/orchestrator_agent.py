@@ -1,5 +1,5 @@
 import json
-from typing import Any, Type, Literal, Optional
+from typing import Any, Type, Literal, Optional, Union
 from dataclasses import dataclass
 
 import uuid
@@ -37,7 +37,7 @@ class OrchestratorAgent:
     base_url: str
     temperature: float
     
-    client: OpenAI | Any
+    client: Union[OpenAI, Any]
 
     available_agents: list[str]
 

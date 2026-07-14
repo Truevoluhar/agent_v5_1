@@ -1,9 +1,13 @@
 import os
+import json
 import argparse
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
+import questionary
+
+from agent.test import run_tests
 
 from agent.generic_agent import GenericAgent
 from agent.orchestrator_agent import OrchestratorAgent, TestSessionItem
@@ -30,28 +34,70 @@ def main():
         default="false",
         help="Enable chat mode with agent(s)"
     )
+    parser.add_argument(
+        "--test",
+        choices=["true", "false"],
+        default="false",
+        help="Pozenemo testno funkcijo namesto agentskega loopa"
+    )
     
-
+    
     args = parser.parse_args()
 
     # Naložimo okoljske spremenljivke iz .env datoteke
     load_dotenv()
+    
+
+    if args.test == "true":
+        run_tests()
+        return
 
 
     # CONFIG LOAD
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+        
+    
+    
 
-    print(str(config))
 
     agents_config = config["agents"]
     orchestrator_config = config['orchestrator_agent']
-    agent_resources = str(PROJECT_ROOT / config['agents_resources' ])
+    agent_resources = str(PROJECT_ROOT / config['agents_resources'])
 
 
-    # INSTANCIRAMO NOV SESSION
-    session = Session()
+    
+    # Ponudimo opcije za session
+    if args.interactive == "true" and _check_existing_sessions(config['session']):
+        options = [
+            "Ustvari novo sejo",
+            "Nalozi obstojeco sejo"
+        ]
+        
 
+        option = questionary.select("Izberi moznost:", choices=options).ask()
+        
+        if option == "Nalozi obstojeco sejo":
+            existing_sessions = _get_existing_sessions(config['session'])
+            chosen_session = questionary.select("Izberi sejo: ", choices=existing_sessions).ask()
+
+            session = Session(
+                id=_get_id_for_existing_session(chosen_session),
+                messages=_get_existing_session_messages(config['session'], chosen_session),
+                session_folder=config['session'],
+                workspace_folder=config['workspace'],
+                memory_folder=config['memory']
+            )
+        else:
+            # INSTANCIRAMO NOV SESSION
+            session = Session(
+                session_folder=config['session'],
+                workspace_folder=config['workspace'],
+                memory_folder=config['memory']
+            )
+
+    
+    
     
 
     # INSTANCIRAMO GENERIČNE AGENTE
@@ -88,6 +134,7 @@ def main():
     )
 
 
+    # Setup prvega sporocila
     messages = [
             { "role": "user", "content": args.initial_prompt }
     ]
@@ -100,6 +147,8 @@ def main():
         print(f"Running step {step} ...")
         
         
+
+        
         orchestrator_response: TestSessionItem = orchestrator_agent.chat_structured(
             messages=session.messages,
             response_model=TestSessionItem,
@@ -110,8 +159,7 @@ def main():
         if orchestrator_response.action == "delegate_to_agent":
             for agent in agents:
                 if agent.name == orchestrator_response.agent_name:
-                    agent_response = agent.chat(session.messages)
-                    session.add_message({ "role": "assistant", "content": agent_response })
+                    agent_response = agent.chat(session.messages, session)
 
         if orchestrator_response.action == "ask_user":
             user_response = input("Respond to agent: ")
@@ -120,19 +168,82 @@ def main():
         if orchestrator_response.action == "finish":
             return
 
-        """
-        for agent in agents:
-            print(f"Available agent: {agent.name}: {agent.id}")
-        
-        
-        planner = agents[0]
 
-        messages = [
-            {"role": "system", "content": planner.system_message},
-            {"role": "user", "content": "Whats 2+2?"}
-        ]
+def _get_existing_sessions(sessions_path: str):
+    folder = Path(sessions_path)
+    
+    if folder.exists() and folder.is_dir():
+        folder_not_empty = any(folder.iterdir())
 
-        response = planner.chat(messages=messages)
-        print(response)
-        """
+        if folder_not_empty:
+            session_files = [
+                path
+                for path in folder.glob("session_*.jsonl")
+                if path.is_file()
+            ]
+
+            if session_files:
+                sessions = []
+                for s in session_files:
+                    s = str(s)
+                    s = s.split("/")[1]
+                    s = s.split(".")[0]
+                    sessions.append(str(s))
+                return sessions
+                    
+            else:
+                print("Nobena obstojeca seja ne obstaja.")
+        else:
+            print("Nobena obstojeca seja ne obstaja.")
+    else:
+        print("Nobena obstojeca seja ne obstaja.")
         
+        
+        
+def _check_existing_sessions(sessions_path: str) -> bool:
+    folder = Path(sessions_path)
+    
+    if folder.exists() and folder.is_dir():
+        folder_not_empty = any(folder.iterdir())
+
+        if folder_not_empty:
+            session_files = [
+                path
+                for path in folder.glob("session_*.jsonl")
+                if path.is_file()
+            ]
+
+            if session_files:
+                return True
+                    
+            else:
+                return False
+        else:
+            return False
+    else:
+        return False
+    
+    
+def _get_id_for_existing_session(session_name: str) -> str:
+    return session_name.split("_")[1]
+
+
+def _get_existing_session_messages(sessions_path: str, session_name: str) -> list[dict]:
+    session_fullpath = f"{sessions_path}/{session_name}.jsonl"
+    
+    messages = []
+    with open(session_fullpath, "r") as f:
+        for line_num, line in enumerate(f, start=1):
+            line = line.strip()
+            
+            if not line:
+                continue
+            
+            try:
+                messages.append(json.loads(line))
+            except Exception as e:
+                raise ValueError(
+                    f"Invalid JSON on line {line_num}: {e}"
+                ) from e
+                
+    return messages
