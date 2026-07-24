@@ -3,11 +3,14 @@ from typing import Optional, Callable
 
 from agent.tools.tools_models import Tool, ToolResult
 from agent.tools.shell import RUN_SHELL_TOOL
+from agent.tools.plan import READ_PLAN_TOOL, CREATE_OR_UPDATE_PLAN_TOOL
 
 
 TOOLS = {
     tool.name: tool for tool in [
-        RUN_SHELL_TOOL
+        RUN_SHELL_TOOL,
+        READ_PLAN_TOOL,
+        CREATE_OR_UPDATE_PLAN_TOOL
     ]
 }
 
@@ -34,7 +37,7 @@ def execute_registered_tool(
 
         executor_kwargs = dict(tool_input)
 
-        result = tool.executor(workspace=".", **executor_kwargs)
+        result = tool.executor(workspace=workspace, **executor_kwargs)
 
         return {
             "ok": result.ok,

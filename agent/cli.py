@@ -10,7 +10,7 @@ import questionary
 from agent.test import run_tests
 
 from agent.generic_agent import GenericAgent
-from agent.orchestrator_agent import OrchestratorAgent, TestSessionItem
+from agent.orchestrator_agent import OrchestratorAgent
 from agent.session import Session
 
 
@@ -18,27 +18,32 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 AGENT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = str(AGENT_ROOT / "config.yml")
 
+
+
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--initial_prompt", help="First prompt where you describe what you want to do with agent.")
+    parser.add_argument("--initial_prompt", help="First prompt where you describe what you want to do with agent.", required=True)
 
     parser.add_argument(
         "--workspace",
         default=".",
-        help="Workspace directory the agent can access."
+        help="Workspace directory the agent can access.",
+        required=True
     )
     parser.add_argument(
         "--interactive",
         choices=["true", "false"],
         default="false",
-        help="Enable chat mode with agent(s)"
+        help="Enable chat mode with agent(s)",
+        required=True
     )
     parser.add_argument(
         "--test",
         choices=["true", "false"],
         default="false",
-        help="Pozenemo testno funkcijo namesto agentskega loopa"
+        help="Pozenemo testno funkcijo namesto agentskega loopa",
+        required=True
     )
     
     
@@ -58,12 +63,32 @@ def main():
         config = yaml.safe_load(f)
         
     
-    
+    # Parsamo user prompt
+    # Če se začne z file=, preberemo iz datoteke
+    if args.initial_prompt.startswith("file="):
+        print("Berem uporabnikov prompt iz datoteke ...")
+        try:
+            filename = args.initial_prompt.split("=")[1]
+            with open(f"./resources/user_prompts/{filename}", "r", encoding="utf-8") as f:
+                prompt_content = f.read()
+            args.initial_prompt = prompt_content
+        except Exception as e:
+            print(e)
+            return
 
+    
 
     agents_config = config["agents"]
     orchestrator_config = config['orchestrator_agent']
     agent_resources = str(PROJECT_ROOT / config['agents_resources'])
+
+    # Nastavimo workspace folder
+    if config["workspace"]:
+        AGENT_WORKSPACE = str(Path(PROJECT_ROOT / config["workspace"]))
+        Path(f"{AGENT_WORKSPACE}/plan").mkdir(parents=True, exist_ok=True)
+    else:
+        AGENT_WORKSPACE = str(Path(PROJECT_ROOT))
+        Path(f"{AGENT_WORKSPACE}/plan").mkdir(parents=True, exist_ok=True)
 
 
     
@@ -95,7 +120,13 @@ def main():
                 workspace_folder=config['workspace'],
                 memory_folder=config['memory']
             )
-
+    else:
+        # INSTANCIRAMO NOV SESSION
+        session = Session(
+            session_folder=config['session'],
+            workspace_folder=config['workspace'],
+            memory_folder=config['memory']
+        )
     
     
     
@@ -111,7 +142,8 @@ def main():
             temperature=agent_data['temperature'],
             base_url=agent_data['base_url'],
             api_key=os.getenv(agent_data['api_key']),
-            resources_path=agent_resources
+            resources_path=agent_resources,
+            workspace_path=AGENT_WORKSPACE
         )
         agents.append(agent)
 
@@ -130,6 +162,7 @@ def main():
         base_url=orchestrator_config['base_url'],
         api_key=os.getenv(orchestrator_config['api_key']),
         resources_path=agent_resources,
+        workspace_path=AGENT_WORKSPACE,
         available_agents=available_agents
     )
 
@@ -140,18 +173,31 @@ def main():
     ]
     session.add_message(messages[0])
 
+
     
 
-    # AGENT LOOP
+
+
+
+
+    ##############
+    #            #
+    # AGENT LOOP #
+    #            #
+    ##############
+
     for step in range(config["max_steps"]):
         print(f"Running step {step} ...")
         
-        
-
-        
-        orchestrator_response: TestSessionItem = orchestrator_agent.chat_structured(
+        """
+        orchestrator_response: TestSessionItem = orchestrator_agent.chat_structured_with_tools(
             messages=session.messages,
+            session=session,
             response_model=TestSessionItem,
+        )
+        """
+        orchestrator_response = orchestrator_agent.chat_structured(
+                    messages=session.messages,
         )
         
         session.add_message({ "role": "assistant", "content": orchestrator_response.description })
@@ -159,7 +205,8 @@ def main():
         if orchestrator_response.action == "delegate_to_agent":
             for agent in agents:
                 if agent.name == orchestrator_response.agent_name:
-                    agent_response = agent.chat(session.messages, session)
+                    agent.chat(session.messages, session)
+
 
         if orchestrator_response.action == "ask_user":
             user_response = input("Respond to agent: ")
@@ -167,6 +214,11 @@ def main():
 
         if orchestrator_response.action == "finish":
             return
+
+
+
+
+
 
 
 def _get_existing_sessions(sessions_path: str):

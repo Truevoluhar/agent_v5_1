@@ -1,27 +1,33 @@
 agents_resources: resources/agents
-workspace: ./agent_workspace
+workspace: agent_workspace
 session: ./session
 memory: ./memory
 max_steps: 100
 
 orchestrator_agent:
   name: ORCHESTRATOR
-  model: gpt-4.1-mini
-  temperature: 0.2
+  model: gpt-5.6-luna
+  temperature: 1.0
   base_url: https://api.openai.com/v1
   api_key: OPENAI_API_KEY
 
 memory_agent:
   name: MEMORY
-  model: gpt-4.1-mini
-  temperature: 0.2
+  model: gpt-5.6-luna
+  temperature: 1.0
   base_url: https://api.openai.com/v1
   api_key: OPENAI_API_KEY
 
 agents:
   agent_001:
     name: PROGRAMMER
-    model: gpt-4.1-mini
-    temperature: 0.2
+    model: gpt-5.6-luna
+    temperature: 1.0
+    base_url: https://api.openai.com/v1
+    api_key: OPENAI_API_KEY
+  agent_002:
+    name: PLANNER
+    model: gpt-5.6-luna
+    temperature: 1.0
     base_url: https://api.openai.com/v1
     api_key: OPENAI_API_KEY

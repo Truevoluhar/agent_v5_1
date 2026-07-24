@@ -93,7 +93,8 @@ RUN_SHELL_TOOL = Tool(
             "timeout": { "type": "integer", "default": 20},
             "background": { "type": "boolean", "default": "false", "description": "Use background for persistent jobs like starting a server." }
         },
-        "required": ["command"]
+        "required": ["command", "cwd", "timeout", "background"],
+        "additionalProperties": False
     },
     executor=run_shell_executor
 )
