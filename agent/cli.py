@@ -98,17 +98,15 @@ def main():
             "Ustvari novo sejo",
             "Nalozi obstojeco sejo"
         ]
-        
 
         option = questionary.select("Izberi moznost:", choices=options).ask()
-        
+
         if option == "Nalozi obstojeco sejo":
             existing_sessions = _get_existing_sessions(config['session'])
             chosen_session = questionary.select("Izberi sejo: ", choices=existing_sessions).ask()
 
             session = Session(
                 id=_get_id_for_existing_session(chosen_session),
-                messages=_get_existing_session_messages(config['session'], chosen_session),
                 session_folder=config['session'],
                 workspace_folder=config['workspace'],
                 memory_folder=config['memory']
@@ -188,29 +186,23 @@ def main():
 
     for step in range(config["max_steps"]):
         print(f"Running step {step} ...")
-        
-        """
-        orchestrator_response: TestSessionItem = orchestrator_agent.chat_structured_with_tools(
-            messages=session.messages,
-            session=session,
-            response_model=TestSessionItem,
-        )
-        """
+
+        orchestrator_messages = session.get_messages_for_agent(max_recent_messages=12)
         orchestrator_response = orchestrator_agent.chat_structured(
-                    messages=session.messages,
+            messages=orchestrator_messages,
         )
-        
-        session.add_message({ "role": "assistant", "content": orchestrator_response.description })
+
+        session.add_message({"role": "assistant", "content": orchestrator_response.description})
 
         if orchestrator_response.action == "delegate_to_agent":
             for agent in agents:
                 if agent.name == orchestrator_response.agent_name:
-                    agent.chat(session.messages, session)
-
+                    agent_messages = session.get_messages_for_agent(max_recent_messages=12)
+                    agent.chat(agent_messages, session)
 
         if orchestrator_response.action == "ask_user":
             user_response = input("Respond to agent: ")
-            session.add_message({ "role": "user", "content": user_response })
+            session.add_message({"role": "user", "content": user_response})
 
         if orchestrator_response.action == "finish":
             return
@@ -223,79 +215,89 @@ def main():
 
 def _get_existing_sessions(sessions_path: str):
     folder = Path(sessions_path)
-    
+
     if folder.exists() and folder.is_dir():
         folder_not_empty = any(folder.iterdir())
 
         if folder_not_empty:
             session_files = [
                 path
-                for path in folder.glob("session_*.jsonl")
+                for path in folder.glob("session_*.sqlite3")
                 if path.is_file()
             ]
+            session_files.extend(
+                [
+                    path
+                    for path in folder.glob("session_*.jsonl")
+                    if path.is_file()
+                ]
+            )
 
             if session_files:
                 sessions = []
                 for s in session_files:
-                    s = str(s)
-                    s = s.split("/")[1]
-                    s = s.split(".")[0]
-                    sessions.append(str(s))
+                    sessions.append(str(s.stem))
                 return sessions
-                    
+
             else:
                 print("Nobena obstojeca seja ne obstaja.")
         else:
             print("Nobena obstojeca seja ne obstaja.")
     else:
         print("Nobena obstojeca seja ne obstaja.")
-        
-        
-        
+
+
 def _check_existing_sessions(sessions_path: str) -> bool:
     folder = Path(sessions_path)
-    
+
     if folder.exists() and folder.is_dir():
         folder_not_empty = any(folder.iterdir())
 
         if folder_not_empty:
             session_files = [
                 path
-                for path in folder.glob("session_*.jsonl")
+                for path in folder.glob("session_*.sqlite3")
                 if path.is_file()
             ]
+            session_files.extend(
+                [
+                    path
+                    for path in folder.glob("session_*.jsonl")
+                    if path.is_file()
+                ]
+            )
 
             if session_files:
                 return True
-                    
+
             else:
                 return False
         else:
             return False
     else:
         return False
-    
-    
+
+
 def _get_id_for_existing_session(session_name: str) -> str:
     return session_name.split("_")[1]
 
 
 def _get_existing_session_messages(sessions_path: str, session_name: str) -> list[dict]:
     session_fullpath = f"{sessions_path}/{session_name}.jsonl"
-    
+
     messages = []
     with open(session_fullpath, "r") as f:
         for line_num, line in enumerate(f, start=1):
             line = line.strip()
-            
+
             if not line:
                 continue
-            
+
             try:
                 messages.append(json.loads(line))
             except Exception as e:
                 raise ValueError(
                     f"Invalid JSON on line {line_num}: {e}"
                 ) from e
-                
+
     return messages

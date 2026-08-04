@@ -1,5 +1,0 @@
-spring:
-  application:
-    name: webservice
-server:
-  port: 8080
