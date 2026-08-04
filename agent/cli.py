@@ -187,7 +187,7 @@ def main():
     for step in range(config["max_steps"]):
         print(f"Running step {step} ...")
 
-        orchestrator_messages = session.get_messages_for_agent(max_recent_messages=12)
+        orchestrator_messages = session.get_bounded_context(max_recent_messages=12)
         orchestrator_response = orchestrator_agent.chat_structured(
             messages=orchestrator_messages,
         )
@@ -197,7 +197,7 @@ def main():
         if orchestrator_response.action == "delegate_to_agent":
             for agent in agents:
                 if agent.name == orchestrator_response.agent_name:
-                    agent_messages = session.get_messages_for_agent(max_recent_messages=12)
+                    agent_messages = session.get_bounded_context(max_recent_messages=12)
                     agent.chat(agent_messages, session)
 
         if orchestrator_response.action == "ask_user":

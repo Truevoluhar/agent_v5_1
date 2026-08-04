@@ -4,6 +4,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
+from agent.semantic_memory import SemanticMemoryIndex
+
 
 class Session:
     id: str
@@ -28,6 +30,7 @@ class Session:
         self.memory_folder = str(Path(memory_folder))
 
         self.db_path = Path(self.session_folder) / f"session_{self.id}.sqlite3"
+        self.semantic_index = SemanticMemoryIndex()
 
         self.create_session_folder()
         self.create_workspace_folder()
@@ -225,7 +228,7 @@ class Session:
 
         self.messages.append(message)
 
-    def _fetch_recent_messages(self, max_recent_messages: int) -> List[Dict[str, Any]]:
+    def _fetch_recent_messages(self, max_recent_messages: int | None) -> List[Dict[str, Any]]:
         if max_recent_messages is None:
             return list(self.messages)
         return self.messages[-max_recent_messages:]
@@ -267,8 +270,11 @@ class Session:
 
         return summary_text
 
-    def get_messages_for_agent(self, max_recent_messages: int = 20) -> List[Dict[str, Any]]:
+    def get_messages_for_agent(self, max_recent_messages: int | None = None) -> List[Dict[str, Any]]:
         self.messages = self._load_messages_from_db()
+
+        if max_recent_messages is None:
+            return list(self.messages)
 
         recent_messages = self._fetch_recent_messages(max_recent_messages)
         long_term_memory = self.build_long_term_memory()
@@ -289,6 +295,9 @@ class Session:
         ]
 
         return bounded_context
+
+    def get_bounded_context(self, max_recent_messages: int = 12) -> List[Dict[str, Any]]:
+        return self.get_messages_for_agent(max_recent_messages=max_recent_messages)
 
     def retrieve_past_sessions(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         session_dir = Path(self.session_folder)
@@ -319,6 +328,14 @@ class Session:
                     )
 
         return matching_rows[:limit]
+
+    def semantic_retrieve(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        return self.semantic_index.search_sessions(
+            session_dir=Path(self.session_folder),
+            current_session_id=self.id,
+            query=query,
+            limit=limit,
+        )
 
     def create_workspace_folder(self):
         try:

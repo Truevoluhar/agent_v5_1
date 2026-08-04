@@ -63,8 +63,10 @@ class SessionMemoryTests(unittest.TestCase):
             second.add_message({"role": "user", "content": "what was the old deployment status"})
 
             matches = second.retrieve_past_sessions("deployment", limit=5)
+            semantic_matches = second.semantic_retrieve("deployment status", limit=5)
 
             self.assertTrue(any(item["session_id"] == "session-1" for item in matches))
+            self.assertTrue(any(item["session_id"] == "session-1" for item in semantic_matches))
 
 
 if __name__ == "__main__":
