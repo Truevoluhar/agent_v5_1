@@ -5,7 +5,9 @@ agent/cli.py
 agent/generic_agent.py
 agent/orchestrator_agent.py
 agent/session.py
+agent/test.py
 agent/tools/__init__.py
+agent/tools/plan.py
 agent/tools/shell.py
 agent/tools/tools_models.py
 agent/tools/tools_registry.py
