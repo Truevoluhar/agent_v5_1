@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Agent Browser Console</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; background: #111827; color: #f9fafb; }
+      .panel { background: #1f2937; border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+      textarea { width: 100%; min-height: 120px; border-radius: 10px; padding: 10px; }
+      button { background: #2563eb; color: white; border: none; border-radius: 8px; padding: 10px 16px; cursor: pointer; }
+      a { color: #93c5fd; text-decoration: none; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 10px; border-bottom: 1px solid #374151; }
+      .muted { color: #9ca3af; }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <h1>Agent Browser Control</h1>
+      <form method="post" action="/sessions/run">
+        <label for="prompt">Initial prompt</label>
+        <textarea name="prompt" id="prompt" placeholder="Describe the task you want the agent to perform"></textarea>
+        <div style="margin-top: 12px;">
+          <button type="submit">Run agent</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2>Sessions</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Session ID</th>
+            <th>Created</th>
+            <th>Messages</th>
+            <th>Latest</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for session in sessions %}
+            <tr>
+              <td><a href="/sessions/{{ session.id }}">{{ session.id }}</a></td>
+              <td>{{ session.created_at or "unknown" }}</td>
+              <td>{{ session.message_count }}</td>
+              <td>{{ session.latest_role or "-" }}: {{ session.latest_content or "-" }}</td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="4" class="muted">No sessions yet.</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </body>
+</html>
