@@ -30,7 +30,7 @@ class Session:
         self.memory_folder = str(Path(memory_folder))
 
         self.db_path = Path(self.session_folder) / f"session_{self.id}.sqlite3"
-        self.semantic_index = SemanticMemoryIndex()
+        self.semantic_index = SemanticMemoryIndex(persist_path=self.memory_folder)
 
         self.create_session_folder()
         self.create_workspace_folder()

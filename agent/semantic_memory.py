@@ -1,62 +1,72 @@
-import hashlib
 import json
-import math
-import re
 import sqlite3
-from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, List
 
-
-_TOKEN_PATTERN = re.compile(r"[a-zA-Z0-9_]+")
+try:
+    from chromadb import PersistentClient
+except ImportError:  # pragma: no cover - fallback for environments without Chroma
+    PersistentClient = None
 
 
 class SemanticMemoryIndex:
-    """A lightweight vector-backed semantic index for session memory recall.
+    """A persistent, embedding-backed semantic index for session memory recall.
 
-    The implementation intentionally avoids external ML packages and uses a
-    deterministic bag-of-words hash embedding. Each normalized token is mapped
-    to a stable vector slot using a hash function, after which cosine similarity
-    is used to score stored messages against the current query.
+    The store is backed by Chroma's persistent client, which creates a browsable
+    local vector database for historical session messages. Each message is stored
+    with its session and row identifiers so cross-session retrieval can surface
+    semantically similar context without needing to parse the entire transcript.
     """
 
-    def __init__(self, dimensions: int = 256):
-        self.dimensions = dimensions
+    def __init__(self, persist_path: str | None = None, collection_name: str = "agent_session_memory"):
+        self.persist_path = Path(persist_path or ".") / "chroma"
+        self.collection_name = collection_name
 
-    def _tokenize(self, text: str) -> List[str]:
-        if not text:
-            return []
-        return [token.lower() for token in _TOKEN_PATTERN.findall(text)]
+        if PersistentClient is None:
+            raise RuntimeError("chromadb is required for embedding-backed semantic memory")
 
-    def _stable_vector_slot(self, token: str) -> int:
-        digest = hashlib.sha256(token.encode("utf-8")).digest()
-        value = int.from_bytes(digest[:8], byteorder="big", signed=False)
-        return value % self.dimensions
+        self.client = PersistentClient(path=str(self.persist_path))
+        self.collection = self.client.get_or_create_collection(name=self.collection_name)
 
-    def _embed_text(self, text: str) -> List[float]:
-        tokens = self._tokenize(text)
-        if not tokens:
-            return [0.0] * self.dimensions
+    def _index_session_file(self, session_file: Path) -> None:
+        with sqlite3.connect(session_file) as connection:
+            connection.row_factory = sqlite3.Row
+            cursor = connection.execute(
+                """
+                SELECT id, session_id, payload
+                FROM messages
+                ORDER BY id ASC
+                """
+            )
 
-        counts = Counter(tokens)
-        vector = [0.0] * self.dimensions
-        for token, count in counts.items():
-            slot = self._stable_vector_slot(token)
-            vector[slot] += float(count)
+            for row in cursor.fetchall():
+                payload = json.loads(row["payload"])
+                content = payload.get("content") if isinstance(payload, dict) else None
+                if not content:
+                    continue
 
-        magnitude = math.sqrt(sum(value * value for value in vector))
-        if magnitude == 0.0:
-            return vector
+                doc_id = f"{row['session_id']}::{row['id']}"
+                existing = self.collection.get(ids=[doc_id], include=[])
+                if existing and existing.get("ids"):
+                    continue
 
-        return [value / magnitude for value in vector]
+                self.collection.add(
+                    documents=[str(content)],
+                    ids=[doc_id],
+                    metadatas=[
+                        {
+                            "session_id": row["session_id"],
+                            "message_id": row["id"],
+                        }
+                    ],
+                )
 
-    def _cosine_similarity(self, left: Sequence[float], right: Sequence[float]) -> float:
-        numerator = sum(a * b for a, b in zip(left, right))
-        left_norm = math.sqrt(sum(value * value for value in left))
-        right_norm = math.sqrt(sum(value * value for value in right))
-        if left_norm == 0.0 or right_norm == 0.0:
-            return 0.0
-        return numerator / (left_norm * right_norm)
+    def _index_session_directory(self, session_dir: Path, current_session_id: str) -> None:
+        self.persist_path.mkdir(parents=True, exist_ok=True)
+        for session_file in sorted(session_dir.glob("session_*.sqlite3")):
+            if session_file.name == f"session_{current_session_id}.sqlite3":
+                continue
+            self._index_session_file(session_file)
 
     def search_sessions(
         self,
@@ -65,41 +75,31 @@ class SemanticMemoryIndex:
         query: str,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        query_text = query or ""
-        query_vector = self._embed_text(query_text)
-        rankings: List[Tuple[float, Dict[str, Any]]] = []
+        self._index_session_directory(session_dir, current_session_id)
+        if not query:
+            return []
 
-        for session_file in sorted(session_dir.glob("session_*.sqlite3")):
-            if session_file.name == f"session_{current_session_id}.sqlite3":
+        results = self.collection.query(
+            query_texts=[query],
+            n_results=limit,
+            include=["documents", "metadatas", "distances"],
+        )
+
+        matches: List[Dict[str, Any]] = []
+        for document, metadata, distance in zip(
+            results.get("documents", [[]])[0],
+            results.get("metadatas", [[]])[0],
+            results.get("distances", [[]])[0],
+        ):
+            if not metadata:
                 continue
+            matches.append(
+                {
+                    "session_id": metadata.get("session_id"),
+                    "message_id": metadata.get("message_id"),
+                    "payload": {"content": document},
+                    "score": float(distance),
+                }
+            )
 
-            with sqlite3.connect(session_file) as connection:
-                connection.row_factory = sqlite3.Row
-                cursor = connection.execute(
-                    """
-                    SELECT id, session_id, payload
-                    FROM messages
-                    ORDER BY id ASC
-                    """
-                )
-                for row in cursor.fetchall():
-                    payload = json.loads(row["payload"])
-                    content = payload.get("content") if isinstance(payload, dict) else None
-                    if not content:
-                        continue
-                    candidate_vector = self._embed_text(str(content))
-                    score = self._cosine_similarity(query_vector, candidate_vector)
-                    rankings.append(
-                        (
-                            score,
-                            {
-                                "session_id": row["session_id"],
-                                "message_id": row["id"],
-                                "payload": payload,
-                                "score": score,
-                            },
-                        )
-                    )
-
-        rankings.sort(key=lambda item: item[0], reverse=True)
-        return [entry for _, entry in rankings[:limit]]
+        return matches
