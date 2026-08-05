@@ -187,7 +187,31 @@ def main():
     for step in range(config["max_steps"]):
         print(f"Running step {step} ...")
 
+        recent_query = next(
+            (
+                message.get("content")
+                for message in reversed(session.messages)
+                if message.get("role") == "user" and message.get("content")
+            ),
+            None,
+        )
+        historical_context = []
+        if recent_query:
+            historical_context = session.hybrid_retrieve(query=recent_query, limit=3)
+
         orchestrator_messages = session.get_bounded_context(max_recent_messages=12)
+        if historical_context:
+            orchestrator_messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": (
+                        "Historical memory evidence from prior sessions: "
+                        f"{json.dumps(historical_context, ensure_ascii=False, default=str)}"
+                    ),
+                },
+            )
+
         orchestrator_response = orchestrator_agent.chat_structured(
             messages=orchestrator_messages,
         )
