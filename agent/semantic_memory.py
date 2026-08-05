@@ -28,6 +28,21 @@ class SemanticMemoryIndex:
         self.client = PersistentClient(path=str(self.persist_path))
         self.collection = self.client.get_or_create_collection(name=self.collection_name)
 
+    def add_message(self, session_id: str, message_id: int, text: str) -> None:
+        if not text:
+            return
+
+        doc_id = f"{session_id}::{message_id}"
+        existing = self.collection.get(ids=[doc_id], include=[])
+        if existing and existing.get("ids"):
+            return
+
+        self.collection.add(
+            documents=[text],
+            ids=[doc_id],
+            metadatas=[{"session_id": session_id, "message_id": message_id}],
+        )
+
     def _index_session_file(self, session_file: Path) -> None:
         with sqlite3.connect(session_file) as connection:
             connection.row_factory = sqlite3.Row
@@ -45,20 +60,10 @@ class SemanticMemoryIndex:
                 if not content:
                     continue
 
-                doc_id = f"{row['session_id']}::{row['id']}"
-                existing = self.collection.get(ids=[doc_id], include=[])
-                if existing and existing.get("ids"):
-                    continue
-
-                self.collection.add(
-                    documents=[str(content)],
-                    ids=[doc_id],
-                    metadatas=[
-                        {
-                            "session_id": row["session_id"],
-                            "message_id": row["id"],
-                        }
-                    ],
+                self.add_message(
+                    session_id=row["session_id"],
+                    message_id=row["id"],
+                    text=str(content),
                 )
 
     def _index_session_directory(self, session_dir: Path, current_session_id: str) -> None:

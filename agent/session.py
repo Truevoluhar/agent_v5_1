@@ -213,7 +213,7 @@ class Session:
         content = message.get("content")
 
         with self._open_connection() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO messages (session_id, role, content, payload)
                 VALUES (?, ?, ?, ?)
@@ -225,8 +225,16 @@ class Session:
                     payload,
                 ),
             )
+            message_id = cursor.lastrowid
 
         self.messages.append(message)
+
+        if isinstance(content, str) and self.semantic_index is not None:
+            self.semantic_index.add_message(
+                session_id=self.id,
+                message_id=message_id,
+                text=content,
+            )
 
     def _fetch_recent_messages(self, max_recent_messages: int | None) -> List[Dict[str, Any]]:
         if max_recent_messages is None:
@@ -336,6 +344,34 @@ class Session:
             query=query,
             limit=limit,
         )
+
+    def hybrid_retrieve(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        semantic_matches = self.semantic_retrieve(query=query, limit=limit)
+        lexical_matches = self.retrieve_past_sessions(query=query, limit=limit)
+
+        merged: List[Dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+
+        for item in semantic_matches + lexical_matches:
+            session_id = item.get("session_id")
+            message_id = item.get("message_id")
+            if session_id is None or message_id is None:
+                continue
+            key = (session_id, message_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+
+        merged.sort(
+            key=lambda item: (
+                item.get("score", float("inf")) if isinstance(item.get("score"), (int, float)) else float("inf"),
+                item.get("session_id", ""),
+            ),
+            reverse=True,
+        )
+
+        return merged[:limit]
 
     def create_workspace_folder(self):
         try:
