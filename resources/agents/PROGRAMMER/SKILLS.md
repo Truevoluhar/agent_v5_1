@@ -98,3 +98,17 @@ Mention:
 * checks run
 * failures or limitations
 * suggested next step, if useful
+
+## Skill: Build Draw.io Diagrams
+
+When the request is to create or modify a draw.io artifact:
+
+1. Call `read_drawio_reference` to load rules from `resources/file_resources/xml-reference.md`.
+2. Produce full draw.io XML (not Mermaid, not SVG).
+3. Call `upsert_drawio_diagram` with:
+	- `action="create"` for new files,
+	- `action="update"` for existing files,
+	- `action="validate"` to validate an existing diagram without rewriting.
+4. If validation fails, fix XML and call `upsert_drawio_diagram` again.
+
+Always satisfy enforced constraints: well-formed XML, unique ids, no XML comments, required edge `mxGeometry`, no manual waypoint arrays, and `html=1` when labels contain HTML markup.

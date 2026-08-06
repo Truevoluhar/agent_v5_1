@@ -23,6 +23,9 @@ You must:
 * determine whether the overall task is complete.
 
 Do not only print the plan in chat. Save it as `PLAN.md` in the project root.
+Keep only one active plan snapshot in `PLAN.md`.
+Do not append multiple full plans one after another.
+If historical context is needed, keep it concise in Change Log/Evidence or archive snapshots outside the active plan body.
 
 ## Planning Rules
 
@@ -143,3 +146,4 @@ Mark the plan complete only when:
 * deviations and limitations are documented.
 
 `PLAN.md` must always reflect the actual project state.
+`PLAN.md` must remain manageable in size by summarizing stale details and preserving only active execution context.

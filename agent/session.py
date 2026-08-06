@@ -308,32 +308,27 @@ class Session:
         return self.get_messages_for_agent(max_recent_messages=max_recent_messages)
 
     def retrieve_past_sessions(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        session_dir = Path(self.session_folder)
         matching_rows: List[Dict[str, Any]] = []
 
-        for session_file in sorted(session_dir.glob("session_*.sqlite3")):
-            if session_file.name == f"session_{self.id}.sqlite3":
-                continue
-
-            with sqlite3.connect(session_file) as connection:
-                cursor = connection.execute(
-                    """
-                    SELECT id, session_id, payload
-                    FROM messages
-                    WHERE payload LIKE ?
-                    ORDER BY id ASC
-                    LIMIT ?
-                    """,
-                    (f"%{query}%", limit),
+        with self._open_connection() as connection:
+            cursor = connection.execute(
+                """
+                SELECT id, session_id, payload
+                FROM messages
+                WHERE session_id = ? AND payload LIKE ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (self.id, f"%{query}%", limit),
+            )
+            for row in cursor.fetchall():
+                matching_rows.append(
+                    {
+                        "session_id": row["session_id"],
+                        "message_id": row["id"],
+                        "payload": json.loads(row["payload"]),
+                    }
                 )
-                for row in cursor.fetchall():
-                    matching_rows.append(
-                        {
-                            "session_id": row[1],
-                            "message_id": row[0],
-                            "payload": json.loads(row[2]),
-                        }
-                    )
 
         return matching_rows[:limit]
 
@@ -345,33 +340,77 @@ class Session:
             limit=limit,
         )
 
-    def hybrid_retrieve(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        semantic_matches = self.semantic_retrieve(query=query, limit=limit)
-        lexical_matches = self.retrieve_past_sessions(query=query, limit=limit)
+    @staticmethod
+    def _semantic_distance(item: Dict[str, Any]) -> float:
+        score = item.get("score")
+        if isinstance(score, (int, float)):
+            return float(score)
+        return float("inf")
 
-        merged: List[Dict[str, Any]] = []
-        seen: set[tuple[str, int]] = set()
+    @classmethod
+    def _rank_fused_matches(
+        cls,
+        semantic_matches: List[Dict[str, Any]],
+        lexical_matches: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        ranked_semantic = sorted(
+            semantic_matches,
+            key=lambda item: (
+                cls._semantic_distance(item),
+                str(item.get("session_id", "")),
+                int(item.get("message_id", 0) or 0),
+            ),
+        )
+        ranked_lexical = list(lexical_matches)
 
-        for item in semantic_matches + lexical_matches:
+        fused: dict[tuple[str, int], Dict[str, Any]] = {}
+
+        for rank, item in enumerate(ranked_semantic, start=1):
             session_id = item.get("session_id")
             message_id = item.get("message_id")
             if session_id is None or message_id is None:
                 continue
-            key = (session_id, message_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(item)
 
-        merged.sort(
+            key = (str(session_id), int(message_id))
+            existing = fused.get(key)
+            if existing is None:
+                existing = dict(item)
+                existing["hybrid_score"] = 0.0
+                fused[key] = existing
+
+            # Reciprocal rank fusion with a semantic tie-breaker.
+            existing["hybrid_score"] += 1.0 / rank
+
+        for rank, item in enumerate(ranked_lexical, start=1):
+            session_id = item.get("session_id")
+            message_id = item.get("message_id")
+            if session_id is None or message_id is None:
+                continue
+
+            key = (str(session_id), int(message_id))
+            existing = fused.get(key)
+            if existing is None:
+                existing = dict(item)
+                existing["hybrid_score"] = 0.0
+                fused[key] = existing
+
+            existing["hybrid_score"] += 1.0 / rank
+
+        return sorted(
+            fused.values(),
             key=lambda item: (
-                item.get("score", float("inf")) if isinstance(item.get("score"), (int, float)) else float("inf"),
-                item.get("session_id", ""),
+                -(item.get("hybrid_score", 0.0)),
+                cls._semantic_distance(item),
+                str(item.get("session_id", "")),
+                int(item.get("message_id", 0) or 0),
             ),
-            reverse=True,
         )
 
-        return merged[:limit]
+    def hybrid_retrieve(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        semantic_matches = self.semantic_retrieve(query=query, limit=limit)
+        lexical_matches = self.retrieve_past_sessions(query=query, limit=limit)
+        ranked = self._rank_fused_matches(semantic_matches, lexical_matches)
+        return ranked[:limit]
 
     def create_workspace_folder(self):
         try:

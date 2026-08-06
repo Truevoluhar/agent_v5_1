@@ -17,6 +17,40 @@ from agent.session import Session
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 AGENT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = str(AGENT_ROOT / "config.yml")
+DEFAULT_PLAN_FILENAME = "PLAN.md"
+MAX_PLAN_CONTEXT_CHARS = 12_000
+
+
+def _read_active_plan_context(workspace_path: str, filename: str = DEFAULT_PLAN_FILENAME) -> tuple[str | None, dict]:
+    plan_path = Path(workspace_path) / filename
+    if not plan_path.exists():
+        return None, {"exists": False, "path": str(plan_path)}
+
+    content = plan_path.read_text(encoding="utf-8")
+    metadata = {
+        "exists": True,
+        "path": str(plan_path),
+        "chars": len(content),
+        "truncated": False,
+    }
+
+    if len(content) > MAX_PLAN_CONTEXT_CHARS:
+        metadata["truncated"] = True
+        content = content[:MAX_PLAN_CONTEXT_CHARS] + "\n\n[TRUNCATED PLAN CONTEXT]"
+
+    return content, metadata
+
+
+def _find_agent_by_name(agents: list[GenericAgent], agent_name: str) -> GenericAgent | None:
+    for agent in agents:
+        if agent.name == agent_name:
+            return agent
+    return None
+
+
+def _planner_name(agents: list[GenericAgent]) -> str | None:
+    planner_agent = _find_agent_by_name(agents, "PLANNER")
+    return planner_agent.name if planner_agent is not None else None
 
 
 
@@ -199,14 +233,40 @@ def main():
         if recent_query:
             historical_context = session.hybrid_retrieve(query=recent_query, limit=3)
 
+        plan_text, _ = _read_active_plan_context(AGENT_WORKSPACE)
+
         orchestrator_messages = session.get_bounded_context(max_recent_messages=12)
+        if plan_text is not None:
+            plan_context_line = (
+                "Active plan (source of truth). Follow this plan and update it instead of creating a separate one.\n\n"
+                f"{plan_text}"
+            )
+            orchestrator_messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": plan_context_line,
+                },
+            )
+        else:
+            orchestrator_messages.insert(
+                0,
+                {
+                    "role": "system",
+                    "content": (
+                        "No active plan file found at PLAN.md. "
+                        "Delegate to PLANNER to create one before substantial implementation tasks."
+                    ),
+                },
+            )
+
         if historical_context:
             orchestrator_messages.insert(
                 0,
                 {
                     "role": "system",
                     "content": (
-                        "Historical memory evidence from prior sessions: "
+                        "Historical memory evidence from the current session: "
                         f"{json.dumps(historical_context, ensure_ascii=False, default=str)}"
                     ),
                 },
@@ -219,10 +279,39 @@ def main():
         session.add_message({"role": "assistant", "content": orchestrator_response.description})
 
         if orchestrator_response.action == "delegate_to_agent":
-            for agent in agents:
-                if agent.name == orchestrator_response.agent_name:
-                    agent_messages = session.get_bounded_context(max_recent_messages=12)
-                    agent.chat(agent_messages, session)
+            delegated_name = orchestrator_response.agent_name
+            planner = _planner_name(agents)
+
+            # Guardrail: when plan is missing, force a planner pass first.
+            if plan_text is None and planner is not None and delegated_name != planner:
+                delegated_name = planner
+                session.add_message(
+                    {
+                        "role": "system",
+                        "content": (
+                            "Delegation overridden to PLANNER because no active PLAN.md exists yet. "
+                            "Create/refresh PLAN.md first."
+                        ),
+                    }
+                )
+
+            delegated_agent = _find_agent_by_name(agents, delegated_name)
+            if delegated_agent is not None:
+                agent_messages = session.get_bounded_context(max_recent_messages=12)
+
+                if plan_text is not None:
+                    agent_messages.insert(
+                        0,
+                        {
+                            "role": "system",
+                            "content": (
+                                "Execution must follow active PLAN.md. "
+                                "If work changes scope, update PLAN.md first, then continue."
+                            ),
+                        },
+                    )
+
+                delegated_agent.chat(agent_messages, session)
 
         if orchestrator_response.action == "ask_user":
             user_response = input("Respond to agent: ")

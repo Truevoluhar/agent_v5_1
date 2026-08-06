@@ -68,10 +68,9 @@ class SemanticMemoryIndex:
 
     def _index_session_directory(self, session_dir: Path, current_session_id: str) -> None:
         self.persist_path.mkdir(parents=True, exist_ok=True)
-        for session_file in sorted(session_dir.glob("session_*.sqlite3")):
-            if session_file.name == f"session_{current_session_id}.sqlite3":
-                continue
-            self._index_session_file(session_file)
+        current_session_file = session_dir / f"session_{current_session_id}.sqlite3"
+        if current_session_file.exists():
+            self._index_session_file(current_session_file)
 
     def search_sessions(
         self,
@@ -97,6 +96,8 @@ class SemanticMemoryIndex:
             results.get("distances", [[]])[0],
         ):
             if not metadata:
+                continue
+            if metadata.get("session_id") != current_session_id:
                 continue
             matches.append(
                 {

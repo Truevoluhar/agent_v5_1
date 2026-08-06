@@ -27,12 +27,15 @@ Use statuses:
 * `skipped`
 
 Keep plans practical and short.
+Create exactly one active plan file at `PLAN.md`.
 
 ## Skill: Update Plan
 
 Update the plan whenever work is completed, fails, becomes unnecessary, or new steps are discovered.
 
 Do not recreate the entire plan unless necessary. Prefer targeted updates.
+Never append a second full plan below the first one.
+Use replacement or section replacement so `PLAN.md` stays bounded and readable.
 
 ## Skill: Delegate To Agent
 
@@ -45,6 +48,7 @@ Examples:
 * Use `verifier` for reviewing failures, checking correctness, and deciding whether issues are real bugs or bad tests.
 
 Delegated tasks must be specific and include all needed context.
+If no active `PLAN.md` exists, delegate to `PLANNER` first.
 
 ## Skill: Call Tool
 

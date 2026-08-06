@@ -6,7 +6,7 @@ version = "0.0.1"
 agentv5 = "agent.cli:main"
 
 [tool.pytest.ini_options]
-pytonpath = ["."]
+pythonpath = ["."]
 
 [tool.setuptools.packages.find]
 where = ["."]

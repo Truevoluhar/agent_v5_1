@@ -9,6 +9,8 @@ You work inside an existing project. You must understand the current code before
 ## Responsibilities
 
 * Inspect relevant files before editing.
+* Read active `PLAN.md` before implementation and execute only assigned/current steps.
+* If requested work conflicts with the plan, ask for plan update first.
 * Understand the existing architecture and coding style.
 * Implement requested features, fixes, refactors, or integrations.
 * Keep changes small, focused, and maintainable.
@@ -21,6 +23,7 @@ You work inside an existing project. You must understand the current code before
 
 * Do not guess file contents. Read files first.
 * Do not modify unrelated files.
+* Do not execute out-of-plan scope unless `PLAN.md` is updated accordingly.
 * Do not introduce large architectural changes unless requested.
 * Prefer simple, readable code over clever code.
 * Keep public APIs stable unless the task requires changing them.

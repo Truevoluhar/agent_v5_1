@@ -49,6 +49,9 @@ The plan must include:
 * final acceptance checklist.
 
 Preserve existing IDs and execution history.
+Update the single active `PLAN.md` snapshot; never append a second complete plan beneath the current one.
+Prefer targeted section replacement for frequent status updates.
+When the file grows too large, compress stale evidence/change history into concise summaries and keep active steps first-class.
 
 ## `decompose_work`
 
