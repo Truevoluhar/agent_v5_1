@@ -1,3 +1,5 @@
+DA PRIDOBIŠ NAVODILA ZA VIZUALIZACIJO KLONIRAJ TALE REPOZITORIJ: https://github.com/Agents365-ai/drawio-skill
+
 Ustvari celovit arhitekturni diagram za razvoj lokalno gostovanega osebnega AI-agenta, zasnovanega po podobnih načelih kot OpenClaw.
 
 Končni rezultat mora biti dejanska, veljavna in urejevalna datoteka draw.io oziroma diagrams.net v formatu XML:

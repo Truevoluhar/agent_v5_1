@@ -5,6 +5,7 @@ from agent.tools.tools_models import Tool, ToolResult
 from agent.tools.shell import RUN_SHELL_TOOL
 from agent.tools.plan import READ_PLAN_TOOL, CREATE_OR_UPDATE_PLAN_TOOL
 from agent.tools.drawio import READ_DRAWIO_REFERENCE_TOOL, UPSERT_DRAWIO_DIAGRAM_TOOL
+from agent.tools.git_repo import GIT_REPO_BROWSER_TOOL
 
 
 TOOLS = {
@@ -12,8 +13,8 @@ TOOLS = {
         RUN_SHELL_TOOL,
         READ_PLAN_TOOL,
         CREATE_OR_UPDATE_PLAN_TOOL,
-        READ_DRAWIO_REFERENCE_TOOL,
         UPSERT_DRAWIO_DIAGRAM_TOOL,
+        GIT_REPO_BROWSER_TOOL,
     ]
 }
 
