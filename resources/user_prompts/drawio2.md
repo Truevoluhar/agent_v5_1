@@ -1,5 +1,3 @@
-DA PRIDOBIŠ NAVODILA ZA VIZUALIZACIJO KLONIRAJ TALE REPOZITORIJ: https://github.com/Agents365-ai/drawio-skill
-
 Ustvari kompleksen, vendar pregleden draw.io diagram arhitekture spletne trgovine, ki prikazuje celoten proces od oddaje naročila do dostave kupcu.
 
 Diagram naj se bere z leve proti desni in naj vsebuje naslednje logične skupine:

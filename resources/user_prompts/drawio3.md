@@ -1,0 +1,1 @@
+Ustvari kompleksen, vendar pregleden draw.io diagram na podlagi navodil za programiranje. Navodila za programiranje najdeš v svojem workspacu, naslov datoteke je nekaj takega: DPP – Shranjevanje CSD Odločb o DPP iz BiZPIZ v UDG in CMOD (NPDPSS001000)
