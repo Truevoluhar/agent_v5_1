@@ -1,0 +1,31 @@
+{
+  "title": "GitResponseSchema",
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Short summary of repositories"
+    },
+    "repo_list": {
+      "type": "array",
+      "description": "List of all public repositories and information about test cases in them.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Repository name"
+          },
+          "test_cases": {
+            "type": "boolean",
+            "description": "Whether repository contains test cases"
+          }
+        },
+        "required": ["name", "test_cases"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["summary", "repo_list"],
+  "additionalProperties": false
+}

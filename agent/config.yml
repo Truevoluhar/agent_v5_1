@@ -18,6 +18,15 @@ memory_agent:
   base_url: https://api.openai.com/v1
   api_key: OPENAI_API_KEY
 
+response_agent:
+  name: RESPONSE
+  model: gpt-5.6-luna
+  temperature: 1.0
+  base_url: https://api.openai.com/v1
+  api_key: OPENAI_API_KEY
+
+response_schema_path: resources/response_schema.json
+
 agents:
   agent_001:
     name: PROGRAMMER

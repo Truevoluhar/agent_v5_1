@@ -154,6 +154,10 @@ class OrchestratorAgent:
         sys_msg += self.agentmd
         sys_msg += self.skillsmd
 
+        sys_msg += "\n\n IMPORTANT ORCHESTRATION RULES \n"
+        sys_msg += "- If the task has been completed and no further delegation or user input is required, return action='finish'.\n"
+        sys_msg += "- A response agent will create the final structured response after you finish.\n"
+        sys_msg += "- Prefer 'finish' over endless delegation once the work requested by the user is complete.\n"
         sys_msg += "\n\n AVAILABLE AGENTS \n"
         for ag in self.available_agents:
             sys_msg += f"OFFICIAL AGENT NAME: {ag}\n"

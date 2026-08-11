@@ -1,6 +1,13 @@
 [project]
 name = "agentv5"
 version = "0.0.1"
+dependencies = [
+  "openai",
+  "pydantic>=2.0",
+  "PyYAML",
+  "python-dotenv",
+  "questionary",
+]
 
 [project.scripts]
 agentv5 = "agent.cli:main"

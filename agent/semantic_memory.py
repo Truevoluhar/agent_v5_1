@@ -10,13 +10,7 @@ except ImportError:  # pragma: no cover - fallback for environments without Chro
 
 
 class SemanticMemoryIndex:
-    """A persistent, embedding-backed semantic index for session memory recall.
-
-    The store is backed by Chroma's persistent client, which creates a browsable
-    local vector database for historical session messages. Each message is stored
-    with its session and row identifiers so cross-session retrieval can surface
-    semantically similar context without needing to parse the entire transcript.
-    """
+    
 
     def __init__(self, persist_path: str | None = None, collection_name: str = "agent_session_memory"):
         self.persist_path = Path(persist_path or ".") / "chroma"

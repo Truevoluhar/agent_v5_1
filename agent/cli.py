@@ -11,6 +11,7 @@ from agent.test import run_tests
 
 from agent.generic_agent import GenericAgent
 from agent.orchestrator_agent import OrchestratorAgent
+from agent.response_agent import ResponseAgent
 from agent.session import Session
 
 
@@ -79,6 +80,11 @@ def main():
         help="Pozenemo testno funkcijo namesto agentskega loopa",
         required=True
     )
+    parser.add_argument(
+        "--response-schema",
+        help="Path to a JSON schema file or inline JSON schema for the final response agent.",
+        default=None,
+    )
     
     
     args = parser.parse_args()
@@ -114,7 +120,17 @@ def main():
 
     agents_config = config["agents"]
     orchestrator_config = config['orchestrator_agent']
+    response_agent_config = config.get('response_agent')
     agent_resources = str(PROJECT_ROOT / config['agents_resources'])
+
+    config_response_schema = config.get('response_schema_path', 'resources/response_schema.json')
+    response_schema_source = args.response_schema or config_response_schema
+    if isinstance(response_schema_source, str):
+        raw_schema = response_schema_source.strip()
+        if raw_schema.startswith('{') or raw_schema.startswith('['):
+            response_schema_source = raw_schema
+        else:
+            response_schema_source = str(PROJECT_ROOT / raw_schema)
 
     # Nastavimo workspace folder
     if config["workspace"]:
@@ -197,6 +213,20 @@ def main():
         workspace_path=AGENT_WORKSPACE,
         available_agents=available_agents
     )
+
+    response_agent = None
+    if response_agent_config:
+        response_agent = ResponseAgent(
+            id="response_agent",
+            name=response_agent_config['name'],
+            model=response_agent_config['model'],
+            temperature=response_agent_config['temperature'],
+            base_url=response_agent_config['base_url'],
+            api_key=os.getenv(response_agent_config['api_key']),
+            resources_path=agent_resources,
+            workspace_path=AGENT_WORKSPACE,
+            response_schema_source=response_schema_source,
+        )
 
 
     # Setup prvega sporocila
@@ -317,7 +347,24 @@ def main():
             user_response = input("Respond to agent: ")
             session.add_message({"role": "user", "content": user_response})
 
-        if orchestrator_response.action == "finish":
+        should_finalize = orchestrator_response.action == "finish" or (
+            step == config["max_steps"] - 1 and orchestrator_response.action != "ask_user"
+        )
+
+        if should_finalize:
+            if response_agent is not None:
+                final_messages = session.get_bounded_context(max_recent_messages=20)
+                final_messages.append(
+                    {
+                        "role": "user",
+                        "content": "Summarize the completed work in the required JSON structure.",
+                    }
+                )
+                response_agent.chat_structured(
+                    messages=final_messages,
+                    schema_source=response_schema_source,
+                    session=session,
+                )
             return
 
 

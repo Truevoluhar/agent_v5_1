@@ -1,3 +1,8 @@
 Metadata-Version: 2.4
 Name: agentv5
 Version: 0.0.1
+Requires-Dist: openai
+Requires-Dist: pydantic>=2.0
+Requires-Dist: PyYAML
+Requires-Dist: python-dotenv
+Requires-Dist: questionary

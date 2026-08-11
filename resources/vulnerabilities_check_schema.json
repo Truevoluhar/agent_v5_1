@@ -1,0 +1,43 @@
+{
+  "title": "VulnerabilitiesCheck",
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Short summary of repositories"
+    },
+    "project_name": {
+        "type": "string",
+        "description": "Name of the project"
+    },
+    "vulnerabilities": {
+      "type": "array",
+      "description": "List of all vulnerabilities",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "name of vulnerability"
+          },
+          "severity": {
+            "type": "string",
+            "description": "Mark vulnerability if its critical or not"
+          },
+          "explanation": {
+            "type": "string",
+            "description": "Explain vulnerability"
+          },
+          "possible_solutions": {
+            "type": "string",
+            "description": "List and explain possible solutions"
+          }
+        },
+        "required": ["name", "severity", "explanation", "possible_solutions"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["summary", "project_name", "vulnerabilities"],
+  "additionalProperties": false
+}
