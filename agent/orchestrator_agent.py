@@ -8,6 +8,7 @@ import uuid
 from openai import OpenAI
 from pydantic import BaseModel, Field, create_model, model_validator, ConfigDict
 
+from agent.context_guard import ContextLimits, ContextWindowGuard
 from agent.session import Session
 from agent.generic_agent import GenericAgent
 from agent.tools.tools_registry import get_tool_schemas, execute_registered_tool
@@ -83,6 +84,8 @@ class OrchestratorAgent:
     api_key: str
     base_url: str
     temperature: float
+    context_limits: ContextLimits
+    context_guard: ContextWindowGuard
     
     client: Union[OpenAI, Any]
 
@@ -91,7 +94,19 @@ class OrchestratorAgent:
 
 
 
-    def __init__(self, id, name, model, api_key, base_url, temperature, resources_path, workspace_path, available_agents):
+    def __init__(
+        self,
+        id,
+        name,
+        model,
+        api_key,
+        base_url,
+        temperature,
+        resources_path,
+        workspace_path,
+        available_agents,
+        context_limits: dict[str, Any] | None = None,
+    ):
         self.id = id
         
         self.name = name
@@ -102,6 +117,8 @@ class OrchestratorAgent:
         self.api_key = api_key
         self.base_url = base_url
         self.temperature = temperature
+        self.context_limits = ContextLimits.from_dict(context_limits)
+        self.context_guard = ContextWindowGuard(self.context_limits)
 
         self.agentmd = self.load_agentmd(self.name)
         self.skillsmd = self.load_skillsmd(self.name)
@@ -112,7 +129,9 @@ class OrchestratorAgent:
         )
         self.response_model = create_orchestrator_response(self.available_agents)
 
-        self.system_message = self.create_system_message()
+        self.system_message = self.context_guard.trim_system_message(
+            self.create_system_message()
+        )
 
 
 
@@ -174,13 +193,28 @@ class OrchestratorAgent:
 
 
     def chat(self, messages: list[dict]) -> str:
-        
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=self.temperature,
-            timeout=None
-        )
+        response = None
+        last_error: Exception | None = None
+
+        for attempt in range(1, self.context_limits.max_retries + 1):
+            bounded_messages = self.context_guard.trim_messages(messages, attempt=attempt)
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=bounded_messages,
+                    temperature=self.temperature,
+                    timeout=None,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if not self.context_guard.is_context_length_error(exc):
+                    raise
+
+        if response is None:
+            raise RuntimeError(
+                "Failed to create completion after context trimming retries."
+            ) from last_error
 
         message = response.choices[0].message
 
@@ -201,13 +235,31 @@ class OrchestratorAgent:
             { "role": "user", "content": message_to_str(messages) }
         ]
 
-        completion = self.client.beta.chat.completions.parse(
-            model=self.model,
-            messages=request_messages,
-            response_format=self.response_model,
-            temperature=self.temperature,
-            reasoning_effort="medium"
-        )
+        completion = None
+        last_error: Exception | None = None
+        for attempt in range(1, self.context_limits.max_retries + 1):
+            bounded_messages = self.context_guard.trim_messages(
+                request_messages,
+                attempt=attempt,
+            )
+            try:
+                completion = self.client.beta.chat.completions.parse(
+                    model=self.model,
+                    messages=bounded_messages,
+                    response_format=self.response_model,
+                    temperature=self.temperature,
+                    reasoning_effort="medium",
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if not self.context_guard.is_context_length_error(exc):
+                    raise
+
+        if completion is None:
+            raise RuntimeError(
+                "Failed to parse orchestrator response after context trimming retries."
+            ) from last_error
 
         message = completion.choices[0].message
 
@@ -246,14 +298,32 @@ class OrchestratorAgent:
 
         for _ in range(max_tool_rounds):
             # Use create(), not parse(), during tool execution.
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=request_messages,
-                temperature=self.temperature,
-                timeout=None,
-                tools=tools,
-                tool_choice="auto",
-            )
+            completion = None
+            last_error = None
+            for attempt in range(1, self.context_limits.max_retries + 1):
+                bounded_messages = self.context_guard.trim_messages(
+                    request_messages,
+                    attempt=attempt,
+                )
+                try:
+                    completion = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=bounded_messages,
+                        temperature=self.temperature,
+                        timeout=None,
+                        tools=tools,
+                        tool_choice="auto",
+                    )
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if not self.context_guard.is_context_length_error(exc):
+                        raise
+
+            if completion is None:
+                raise RuntimeError(
+                    "Failed to run tool-enabled completion after context trimming retries."
+                ) from last_error
 
             message = completion.choices[0].message
             request_messages.append(message)
@@ -303,11 +373,7 @@ class OrchestratorAgent:
                     tool_response = {
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": json.dumps(
-                            tool_payload,
-                            ensure_ascii=False,
-                            default=str,
-                        ),
+                        "content": self.context_guard.trim_tool_output(tool_payload),
                     }
                     request_messages.append(tool_response)
                     session.add_message(message=tool_response)
@@ -350,13 +416,31 @@ class OrchestratorAgent:
             }
         )
 
-        final_completion = self.client.chat.completions.parse(
-            model=self.model,
-            messages=request_messages,
-            response_format=response_model,
-            temperature=self.temperature,
-            timeout=None,
-        )
+        final_completion = None
+        last_error = None
+        for attempt in range(1, self.context_limits.max_retries + 1):
+            bounded_messages = self.context_guard.trim_messages(
+                request_messages,
+                attempt=attempt,
+            )
+            try:
+                final_completion = self.client.chat.completions.parse(
+                    model=self.model,
+                    messages=bounded_messages,
+                    response_format=response_model,
+                    temperature=self.temperature,
+                    timeout=None,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if not self.context_guard.is_context_length_error(exc):
+                    raise
+
+        if final_completion is None:
+            raise RuntimeError(
+                "Failed to produce final structured result after context trimming retries."
+            ) from last_error
 
         final_message = final_completion.choices[0].message
 

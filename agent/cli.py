@@ -85,6 +85,15 @@ def main():
         help="Path to a JSON schema file or inline JSON schema for the final response agent.",
         default=None,
     )
+    parser.add_argument(
+        "--max-context-chars",
+        type=int,
+        default=None,
+        help=(
+            "Optional global upper bound for model input character budget. "
+            "If provided, it overrides context_limits.max_input_chars from config."
+        ),
+    )
     
     
     args = parser.parse_args()
@@ -122,6 +131,15 @@ def main():
     orchestrator_config = config['orchestrator_agent']
     response_agent_config = config.get('response_agent')
     agent_resources = str(PROJECT_ROOT / config['agents_resources'])
+    context_limits = dict(config.get("context_limits", {}) or {})
+
+    if args.max_context_chars is not None:
+        context_limits["max_input_chars"] = int(args.max_context_chars)
+
+    max_input_chars = int(context_limits.get("max_input_chars", 120000))
+    orchestrator_context_budget = max(4000, int(max_input_chars * 0.45))
+    delegated_context_budget = max(4000, int(max_input_chars * 0.50))
+    response_context_budget = max(6000, int(max_input_chars * 0.60))
 
     config_response_schema = config.get('response_schema_path', 'resources/response_schema.json')
     response_schema_source = args.response_schema or config_response_schema
@@ -191,7 +209,8 @@ def main():
             base_url=agent_data['base_url'],
             api_key=os.getenv(agent_data['api_key']),
             resources_path=agent_resources,
-            workspace_path=AGENT_WORKSPACE
+            workspace_path=AGENT_WORKSPACE,
+            context_limits=context_limits,
         )
         agents.append(agent)
 
@@ -211,7 +230,8 @@ def main():
         api_key=os.getenv(orchestrator_config['api_key']),
         resources_path=agent_resources,
         workspace_path=AGENT_WORKSPACE,
-        available_agents=available_agents
+        available_agents=available_agents,
+        context_limits=context_limits,
     )
 
     response_agent = None
@@ -226,6 +246,7 @@ def main():
             resources_path=agent_resources,
             workspace_path=AGENT_WORKSPACE,
             response_schema_source=response_schema_source,
+            context_limits=context_limits,
         )
 
 
@@ -259,13 +280,26 @@ def main():
             ),
             None,
         )
-        historical_context = []
+        historical_context = ""
         if recent_query:
-            historical_context = session.hybrid_retrieve(query=recent_query, limit=3)
+            retrieval_limit = Session.suggest_retrieval_limit(
+                context_budget_chars=orchestrator_context_budget // 5,
+                min_limit=1,
+                max_limit=6,
+                chars_per_match=450,
+            )
+            historical_context = session.format_retrieval_context(
+                query=recent_query,
+                limit=retrieval_limit,
+                max_chars=max(600, orchestrator_context_budget // 6),
+            )
 
         plan_text, _ = _read_active_plan_context(AGENT_WORKSPACE)
 
-        orchestrator_messages = session.get_bounded_context(max_recent_messages=12)
+        orchestrator_messages = session.get_bounded_context(
+            max_recent_messages=12,
+            max_context_chars=orchestrator_context_budget,
+        )
         if plan_text is not None:
             plan_context_line = (
                 "Active plan (source of truth). Follow this plan and update it instead of creating a separate one.\n\n"
@@ -295,10 +329,7 @@ def main():
                 0,
                 {
                     "role": "system",
-                    "content": (
-                        "Historical memory evidence from the current session: "
-                        f"{json.dumps(historical_context, ensure_ascii=False, default=str)}"
-                    ),
+                    "content": historical_context,
                 },
             )
 
@@ -327,7 +358,10 @@ def main():
 
             delegated_agent = _find_agent_by_name(agents, delegated_name)
             if delegated_agent is not None:
-                agent_messages = session.get_bounded_context(max_recent_messages=12)
+                agent_messages = session.get_bounded_context(
+                    max_recent_messages=12,
+                    max_context_chars=delegated_context_budget,
+                )
 
                 if plan_text is not None:
                     agent_messages.insert(
@@ -353,7 +387,10 @@ def main():
 
         if should_finalize:
             if response_agent is not None:
-                final_messages = session.get_bounded_context(max_recent_messages=20)
+                final_messages = session.get_bounded_context(
+                    max_recent_messages=20,
+                    max_context_chars=response_context_budget,
+                )
                 final_messages.append(
                     {
                         "role": "user",

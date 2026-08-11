@@ -1,1 +1,1 @@
-Preglej tale repozitorij in preveri za kakšne morebitne ranljivosti: https://github.com/Truevoluhar/wstestagent
+Preglej tale repozitorij in preveri za kakšne morebitne ranljivosti: https://github.com/luca-vercelli/java-web-template

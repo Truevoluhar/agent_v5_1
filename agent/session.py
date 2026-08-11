@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import uuid
+from math import floor
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -241,6 +242,101 @@ class Session:
             return list(self.messages)
         return self.messages[-max_recent_messages:]
 
+    @staticmethod
+    def _to_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            return str(value)
+
+    @classmethod
+    def _shorten_text(cls, value: Any, limit: int) -> str:
+        text = cls._to_text(value)
+        if limit <= 0:
+            return ""
+        if len(text) <= limit:
+            return text
+        notice = " ... [truncated]"
+        if limit <= len(notice):
+            return text[:limit]
+        return text[: limit - len(notice)] + notice
+
+    def _build_older_context_summary(
+        self,
+        older_messages: List[Dict[str, Any]],
+        *,
+        max_chars: int,
+        max_items: int = 10,
+    ) -> str | None:
+        if not older_messages or max_chars <= 0:
+            return None
+
+        lines: list[str] = []
+        if older_messages:
+            first = older_messages[0]
+            first_content = self._shorten_text(first.get("content"), 180)
+            if first_content:
+                lines.append(f"- Initial context [{first.get('role', 'unknown')}]: {first_content}")
+
+        if len(older_messages) > 1:
+            tail = older_messages[-max_items:]
+            for item in tail:
+                content = self._shorten_text(item.get("content"), 180)
+                if not content:
+                    continue
+                lines.append(f"- Recent prior [{item.get('role', 'unknown')}]: {content}")
+
+        if not lines:
+            return None
+
+        summary = "Context summary of earlier conversation:\n" + "\n".join(lines)
+        return self._shorten_text(summary, max_chars)
+
+    @classmethod
+    def suggest_retrieval_limit(
+        cls,
+        context_budget_chars: int,
+        *,
+        min_limit: int = 1,
+        max_limit: int = 6,
+        chars_per_match: int = 450,
+    ) -> int:
+        if context_budget_chars <= 0:
+            return min_limit
+        estimated = floor(context_budget_chars / max(1, chars_per_match))
+        return max(min_limit, min(max_limit, estimated))
+
+    def format_retrieval_context(
+        self,
+        query: str,
+        *,
+        limit: int,
+        max_chars: int,
+    ) -> str:
+        matches = self.hybrid_retrieve(query=query, limit=limit)
+        if not matches:
+            return ""
+
+        lines = ["Historical memory evidence (current session only):"]
+        for idx, item in enumerate(matches, start=1):
+            payload = item.get("payload", {})
+            content = ""
+            if isinstance(payload, dict):
+                content = self._to_text(payload.get("content"))
+            if not content:
+                content = self._to_text(payload)
+
+            score = item.get("hybrid_score", item.get("score", "n/a"))
+            lines.append(
+                f"{idx}. id={item.get('message_id')} score={score} text={self._shorten_text(content, 220)}"
+            )
+
+        return self._shorten_text("\n".join(lines), max_chars)
+
     def build_long_term_memory(self) -> str:
         with self._open_connection() as connection:
             cursor = connection.execute(
@@ -278,7 +374,11 @@ class Session:
 
         return summary_text
 
-    def get_messages_for_agent(self, max_recent_messages: int | None = None) -> List[Dict[str, Any]]:
+    def get_messages_for_agent(
+        self,
+        max_recent_messages: int | None = None,
+        max_context_chars: int | None = None,
+    ) -> List[Dict[str, Any]]:
         self.messages = self._load_messages_from_db()
 
         if max_recent_messages is None:
@@ -287,25 +387,94 @@ class Session:
         recent_messages = self._fetch_recent_messages(max_recent_messages)
         long_term_memory = self.build_long_term_memory()
 
+        long_term_entry = {
+            "role": "system",
+            "content": f"Long-term memory: {self._shorten_text(long_term_memory, 1200)}",
+        }
+
+        short_term_entry = {
+            "role": "system",
+            "content": (
+                "Short-term memory: only the latest messages are kept in the active context "
+                "to avoid token growth across long tasks."
+            ),
+        }
+
+        older_messages = self.messages[:-max_recent_messages] if max_recent_messages > 0 else []
+        older_summary = None
+
+        if max_context_chars is not None:
+            summary_budget = max(300, max_context_chars // 6)
+            older_summary = self._build_older_context_summary(
+                older_messages,
+                max_chars=summary_budget,
+            )
+
+            if older_summary:
+                summary_entry = {
+                    "role": "system",
+                    "content": older_summary,
+                }
+                bounded_context = [
+                    long_term_entry,
+                    short_term_entry,
+                    summary_entry,
+                    *recent_messages,
+                ]
+            else:
+                bounded_context = [
+                    long_term_entry,
+                    short_term_entry,
+                    *recent_messages,
+                ]
+
+            total_chars = sum(
+                len(self._to_text(message.get("content")))
+                for message in bounded_context
+            )
+            if total_chars > max_context_chars:
+                trimmed_recent: list[Dict[str, Any]] = []
+                current = 0
+                for message in reversed(recent_messages):
+                    size = len(self._to_text(message.get("content")))
+                    if current + size > max_context_chars // 2 and len(trimmed_recent) >= 3:
+                        break
+                    trimmed_recent.append(message)
+                    current += size
+                trimmed_recent.reverse()
+
+                bounded_context = [
+                    long_term_entry,
+                    short_term_entry,
+                ]
+                if older_summary:
+                    bounded_context.append(
+                        {
+                            "role": "system",
+                            "content": older_summary,
+                        }
+                    )
+                bounded_context.extend(trimmed_recent)
+
+            return bounded_context
+
         bounded_context = [
-            {
-                "role": "system",
-                "content": f"Long-term memory: {long_term_memory}",
-            },
-            {
-                "role": "system",
-                "content": (
-                    "Short-term memory: only the latest messages are kept in the active context "
-                    "to avoid token growth across long tasks."
-                ),
-            },
+            long_term_entry,
+            short_term_entry,
             *recent_messages,
         ]
 
         return bounded_context
 
-    def get_bounded_context(self, max_recent_messages: int = 12) -> List[Dict[str, Any]]:
-        return self.get_messages_for_agent(max_recent_messages=max_recent_messages)
+    def get_bounded_context(
+        self,
+        max_recent_messages: int = 12,
+        max_context_chars: int | None = None,
+    ) -> List[Dict[str, Any]]:
+        return self.get_messages_for_agent(
+            max_recent_messages=max_recent_messages,
+            max_context_chars=max_context_chars,
+        )
 
     def retrieve_past_sessions(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
         matching_rows: List[Dict[str, Any]] = []

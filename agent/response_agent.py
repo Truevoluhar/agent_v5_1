@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
+from agent.context_guard import ContextLimits, ContextWindowGuard
 from agent.generic_agent import GenericAgent
 from agent.session import Session
 
@@ -130,6 +131,8 @@ def create_dynamic_response_model(
 class ResponseAgent(GenericAgent):
 
     response_schema_source: str | Path | dict[str, Any] | None
+    context_limits: ContextLimits
+    context_guard: ContextWindowGuard
 
     def __init__(
         self,
@@ -142,6 +145,7 @@ class ResponseAgent(GenericAgent):
         resources_path,
         workspace_path,
         response_schema_source: str | Path | dict[str, Any] | None = None,
+        context_limits: dict[str, Any] | None = None,
     ):
         self.response_schema_source = response_schema_source
         super().__init__(
@@ -153,6 +157,7 @@ class ResponseAgent(GenericAgent):
             temperature=temperature,
             resources_path=resources_path,
             workspace_path=workspace_path,
+            context_limits=context_limits,
         )
 
     def chat_structured(
@@ -176,13 +181,31 @@ class ResponseAgent(GenericAgent):
             *messages,
         ]
 
-        completion = self.client.beta.chat.completions.parse(
-            model=self.model,
-            messages=request_messages,
-            response_format=response_model,
-            temperature=self.temperature,
-            timeout=None,
-        )
+        completion = None
+        last_error: Exception | None = None
+        for attempt in range(1, self.context_limits.max_retries + 1):
+            bounded_messages = self.context_guard.trim_messages(
+                request_messages,
+                attempt=attempt,
+            )
+            try:
+                completion = self.client.beta.chat.completions.parse(
+                    model=self.model,
+                    messages=bounded_messages,
+                    response_format=response_model,
+                    temperature=self.temperature,
+                    timeout=None,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if not self.context_guard.is_context_length_error(exc):
+                    raise
+
+        if completion is None:
+            raise RuntimeError(
+                "Failed to parse response schema output after context trimming retries."
+            ) from last_error
 
         message = completion.choices[0].message
 

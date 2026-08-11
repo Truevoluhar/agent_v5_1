@@ -4,6 +4,14 @@ session: ./session
 memory: ./memory
 max_steps: 100
 
+context_limits:
+  max_system_message_chars: 10000
+  max_input_chars: 22000
+  max_message_chars: 10000
+  max_tool_output_chars: 10000
+  min_recent_messages: 3
+  max_retries: 4
+
 orchestrator_agent:
   name: ORCHESTRATOR
   model: gpt-5.6-luna
