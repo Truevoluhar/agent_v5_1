@@ -13,6 +13,7 @@ from agent.generic_agent import GenericAgent
 from agent.orchestrator_agent import OrchestratorAgent
 from agent.response_agent import ResponseAgent
 from agent.session import Session
+from agent.user_storage import user_storage_paths
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +60,11 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--initial_prompt", help="First prompt where you describe what you want to do with agent.", required=True)
+    parser.add_argument(
+        "--username",
+        required=True,
+        help="Username that owns this user's sessions and memory.",
+    )
 
     parser.add_argument(
         "--workspace",
@@ -110,6 +116,15 @@ def main():
     # CONFIG LOAD
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
+
+    try:
+        user_storage = user_storage_paths(
+            args.username,
+            session_folder=config["session"],
+            memory_folder=config["memory"],
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
         
     
     # Parsamo user prompt
@@ -161,7 +176,7 @@ def main():
 
     
     # Ponudimo opcije za session
-    if args.interactive == "true" and _check_existing_sessions(config['session']):
+    if args.interactive == "true" and _check_existing_sessions(user_storage.session_folder):
         options = [
             "Ustvari novo sejo",
             "Nalozi obstojeco sejo"
@@ -170,28 +185,28 @@ def main():
         option = questionary.select("Izberi moznost:", choices=options).ask()
 
         if option == "Nalozi obstojeco sejo":
-            existing_sessions = _get_existing_sessions(config['session'])
+            existing_sessions = _get_existing_sessions(user_storage.session_folder)
             chosen_session = questionary.select("Izberi sejo: ", choices=existing_sessions).ask()
 
             session = Session(
                 id=_get_id_for_existing_session(chosen_session),
-                session_folder=config['session'],
+                session_folder=user_storage.session_folder,
                 workspace_folder=config['workspace'],
-                memory_folder=config['memory']
+                memory_folder=user_storage.memory_folder,
             )
         else:
             # INSTANCIRAMO NOV SESSION
             session = Session(
-                session_folder=config['session'],
+                session_folder=user_storage.session_folder,
                 workspace_folder=config['workspace'],
-                memory_folder=config['memory']
+                memory_folder=user_storage.memory_folder,
             )
     else:
         # INSTANCIRAMO NOV SESSION
         session = Session(
-            session_folder=config['session'],
+            session_folder=user_storage.session_folder,
             workspace_folder=config['workspace'],
-            memory_folder=config['memory']
+            memory_folder=user_storage.memory_folder,
         )
     
     

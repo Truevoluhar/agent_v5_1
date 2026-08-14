@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 from agent.session import Session
+from agent.user_storage import UserStoragePaths, user_storage_paths
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "agent" / "config.yml"
@@ -34,10 +35,21 @@ templates = Jinja2Templates(directory=str(PROJECT_ROOT / "agent" / "templates"))
 ACTIVE_RUNS: dict[str, dict[str, Any]] = {}
 
 
-def _session_listing() -> list[dict[str, Any]]:
+def _user_storage(username: str) -> UserStoragePaths:
+    try:
+        return user_storage_paths(
+            username,
+            session_folder=SESSION_DIR,
+            memory_folder=MEMORY_DIR,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _session_listing(session_dir: Path) -> list[dict[str, Any]]:
     sessions: list[dict[str, Any]] = []
 
-    for session_file in sorted(SESSION_DIR.glob("session_*.sqlite3")):
+    for session_file in sorted(session_dir.glob("session_*.sqlite3")):
         session_id = session_file.stem.replace("session_", "")
         try:
             with sqlite3.connect(session_file) as connection:
@@ -73,22 +85,27 @@ def _session_listing() -> list[dict[str, Any]]:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request):
-    sessions = _session_listing()
+async def dashboard(request: Request, username: str = Query(...)):
+    storage = _user_storage(username)
+    sessions = _session_listing(Path(storage.session_folder))
     return templates.TemplateResponse(
         request=request,
         name="index.html",
         context={
             "sessions": sessions,
             "active_runs": ACTIVE_RUNS,
+            "username": username,
         },
     )
 
 
 @app.post("/sessions/run")
-async def run_session(prompt: str = Form(...)):
+async def run_session(prompt: str = Form(...), username: str = Form(...)):
+    _user_storage(username)
     command = [
         "agentv5",
+        "--username",
+        username,
         "--workspace",
         "agent_workspace",
         "--test",
@@ -110,18 +127,24 @@ async def run_session(prompt: str = Form(...)):
     ACTIVE_RUNS[str(process.pid)] = {
         "pid": process.pid,
         "prompt": prompt,
+        "username": username,
         "status": "running",
     }
 
-    return RedirectResponse(url="/", status_code=303)
+    return RedirectResponse(url=f"/?username={username}", status_code=303)
 
 
 @app.get("/sessions/{session_id}", response_class=HTMLResponse)
-async def session_detail(request: Request, session_id: str):
+async def session_detail(request: Request, session_id: str, username: str = Query(...)):
+    storage = _user_storage(username)
+    session_dir = Path(storage.session_folder)
+    if not (session_dir / f"session_{session_id}.sqlite3").is_file():
+        raise HTTPException(status_code=404, detail="Session not found")
+
     session = Session(
-        session_folder=str(SESSION_DIR),
+        session_folder=storage.session_folder,
         workspace_folder=str(WORKSPACE_DIR),
-        memory_folder=str(MEMORY_DIR),
+        memory_folder=storage.memory_folder,
         id=session_id,
     )
 
@@ -132,13 +155,15 @@ async def session_detail(request: Request, session_id: str):
         context={
             "session_id": session_id,
             "messages": messages,
+            "username": username,
         },
     )
 
 
 @app.get("/api/sessions")
-async def api_sessions():
-    return {"sessions": _session_listing()}
+async def api_sessions(username: str = Query(...)):
+    storage = _user_storage(username)
+    return {"sessions": _session_listing(Path(storage.session_folder))}
 
 
 @app.get("/healthz")
