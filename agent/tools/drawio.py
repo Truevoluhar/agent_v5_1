@@ -6,6 +6,7 @@ import re
 from xml.etree import ElementTree as ET
 
 from agent.tools.tools_models import Tool, ToolResult
+from agent.paths import DATA_ROOT
 
 
 REFERENCE_RELATIVE_PATH = Path("resources/file_resources/xml-reference.md")
@@ -15,12 +16,8 @@ HTML_TAG_RE = re.compile(r"<[^>]+>")
 FORBIDDEN_EDGE_KEYS = ("exitX=", "exitY=", "entryX=", "entryY=")
 
 
-def _project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
 def _reference_path() -> Path:
-    return _project_root() / REFERENCE_RELATIVE_PATH
+    return DATA_ROOT / REFERENCE_RELATIVE_PATH
 
 
 def _resolve_workspace_file(workspace: Path, file_path: str) -> Path:

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Files: {{ root_name }}</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; background: #111827; color: #f9fafb; }
+      .panel { background: #1f2937; border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 8px; border-bottom: 1px solid #374151; }
+      a { color: #93c5fd; text-decoration: none; }
+      input, textarea { width: 100%; border-radius: 8px; padding: 8px; margin: 4px 0; }
+      button { background: #2563eb; color: white; border: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+      .danger { background: #dc2626; }
+      .row-actions form { display: inline; }
+      .tabs a { margin-right: 12px; padding: 6px 10px; border-radius: 8px; background: #374151; }
+      .tabs a.active { background: #2563eb; }
+      .muted { color: #9ca3af; }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <h1>Shared data browser</h1>
+      <p><a href="/">Back to dashboard</a></p>
+      <div class="tabs">
+        {% for r in roots %}
+          <a href="/files/{{ r }}" class="{{ 'active' if r == root_name else '' }}">{{ r }}</a>
+        {% endfor %}
+      </div>
+      <p class="muted">Root: <strong>{{ root_name }}</strong> / Path: <strong>{{ path }}</strong></p>
+    </div>
+
+    <div class="panel">
+      <h2>Entries</h2>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Type</th><th>Size</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          {% if path != '.' %}
+            <tr>
+              <td colspan="4"><a href="/files/{{ root_name }}?path={{ path }}/..">.. (up)</a></td>
+            </tr>
+          {% endif %}
+          {% for entry in entries %}
+            {% set entry_path = (path + '/' + entry.name) if path != '.' else entry.name %}
+            <tr>
+              <td>
+                {% if entry.is_dir %}
+                  <a href="/files/{{ root_name }}?path={{ entry_path }}">{{ entry.name }}/</a>
+                {% else %}
+                  <a href="/files/{{ root_name }}/view?path={{ entry_path }}" target="_blank">{{ entry.name }}</a>
+                {% endif %}
+              </td>
+              <td>{{ "dir" if entry.is_dir else "file" }}</td>
+              <td>{{ entry.size }}</td>
+              <td class="row-actions">
+                <form method="post" action="/files/{{ root_name }}/delete" onsubmit="return confirm('Delete {{ entry.name }}?')">
+                  <input type="hidden" name="path" value="{{ entry_path }}" />
+                  <input type="hidden" name="recursive" value="{{ 'true' if entry.is_dir else 'false' }}" />
+                  <button type="submit" class="danger">Delete</button>
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="4" class="muted">Empty directory.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>Create directory</h2>
+      <form method="post" action="/files/{{ root_name }}/mkdir">
+        <input type="hidden" name="path" value="{{ path }}" />
+        <input type="text" name="name" placeholder="new-folder-name" required />
+        <button type="submit">Create</button>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2>Upload file</h2>
+      <form method="post" action="/files/{{ root_name }}/upload" enctype="multipart/form-data">
+        <input type="hidden" name="path" value="{{ path }}" />
+        <input type="file" name="file" required />
+        <button type="submit">Upload</button>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2>Write/edit text file</h2>
+      <form method="post" action="/files/{{ root_name }}/write">
+        <label>Relative path (created if missing)</label>
+        <input type="text" name="path" placeholder="{{ path }}/notes.txt" required />
+        <textarea name="content" rows="8" placeholder="File content..."></textarea>
+        <button type="submit">Save</button>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2>Move / rename</h2>
+      <form method="post" action="/files/{{ root_name }}/move">
+        <label>Source path</label>
+        <input type="text" name="src" required />
+        <label>Destination path</label>
+        <input type="text" name="dst" required />
+        <button type="submit">Move</button>
+      </form>
+    </div>
+  </body>
+</html>

@@ -6,9 +6,9 @@ import yaml
 
 from agent.generic_agent import GenericAgent
 from agent.session import Session
+from agent.paths import DATA_ROOT
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 AGENT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = str(AGENT_ROOT / "config.yml")
 
@@ -23,7 +23,7 @@ def _compact_memory():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
         
-    sessions_path = config['session']
+    sessions_path = DATA_ROOT / config['session']
     session_file = "session_46550ce6-cd3e-492d-967f-7568ebd776b1.jsonl"
     
     memory = []
@@ -40,7 +40,7 @@ def _compact_memory():
                 raise TypeError(e)
             
     memory_agent_config = config['memory_agent']
-    agent_resources = str(PROJECT_ROOT / config['agents_resources'])
+    agent_resources = str(DATA_ROOT / config['agents_resources'])
     
     memory_agent = GenericAgent(
         id="memory_agent",
@@ -58,9 +58,9 @@ def _compact_memory():
     session = Session(
         id=session_id,
         messages=memory,
-        memory_folder=config['memory'],
-        workspace_folder=config['workspace'],
-        session_folder=config['session']        
+        memory_folder=str(DATA_ROOT / config['memory']),
+        workspace_folder=str(DATA_ROOT / config['workspace']),
+        session_folder=str(DATA_ROOT / config['session']),
     )
     
     memory.append(

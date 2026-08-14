@@ -14,9 +14,9 @@ from agent.orchestrator_agent import OrchestratorAgent
 from agent.response_agent import ResponseAgent
 from agent.session import Session
 from agent.user_storage import user_storage_paths
+from agent.paths import DATA_ROOT
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 AGENT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = str(AGENT_ROOT / "config.yml")
 DEFAULT_PLAN_FILENAME = "PLAN.md"
@@ -120,8 +120,8 @@ def main():
     try:
         user_storage = user_storage_paths(
             args.username,
-            session_folder=config["session"],
-            memory_folder=config["memory"],
+            session_folder=DATA_ROOT / config["session"],
+            memory_folder=DATA_ROOT / config["memory"],
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -133,7 +133,7 @@ def main():
         print("Berem uporabnikov prompt iz datoteke ...")
         try:
             filename = args.initial_prompt.split("=")[1]
-            with open(f"./resources/user_prompts/{filename}", "r", encoding="utf-8") as f:
+            with open(DATA_ROOT / "resources" / "user_prompts" / filename, "r", encoding="utf-8") as f:
                 prompt_content = f.read()
             args.initial_prompt = prompt_content
         except Exception as e:
@@ -145,7 +145,7 @@ def main():
     agents_config = config["agents"]
     orchestrator_config = config['orchestrator_agent']
     response_agent_config = config.get('response_agent')
-    agent_resources = str(PROJECT_ROOT / config['agents_resources'])
+    agent_resources = str(DATA_ROOT / config['agents_resources'])
     context_limits = dict(config.get("context_limits", {}) or {})
 
     if args.max_context_chars is not None:
@@ -163,14 +163,14 @@ def main():
         if raw_schema.startswith('{') or raw_schema.startswith('['):
             response_schema_source = raw_schema
         else:
-            response_schema_source = str(PROJECT_ROOT / raw_schema)
+            response_schema_source = str(DATA_ROOT / raw_schema)
 
     # Nastavimo workspace folder
     if config["workspace"]:
-        AGENT_WORKSPACE = str(Path(PROJECT_ROOT / config["workspace"]))
+        AGENT_WORKSPACE = str(Path(DATA_ROOT / config["workspace"]))
         Path(f"{AGENT_WORKSPACE}/plan").mkdir(parents=True, exist_ok=True)
     else:
-        AGENT_WORKSPACE = str(Path(PROJECT_ROOT))
+        AGENT_WORKSPACE = str(Path(DATA_ROOT))
         Path(f"{AGENT_WORKSPACE}/plan").mkdir(parents=True, exist_ok=True)
 
 
@@ -191,21 +191,21 @@ def main():
             session = Session(
                 id=_get_id_for_existing_session(chosen_session),
                 session_folder=user_storage.session_folder,
-                workspace_folder=config['workspace'],
+                workspace_folder=AGENT_WORKSPACE,
                 memory_folder=user_storage.memory_folder,
             )
         else:
             # INSTANCIRAMO NOV SESSION
             session = Session(
                 session_folder=user_storage.session_folder,
-                workspace_folder=config['workspace'],
+                workspace_folder=AGENT_WORKSPACE,
                 memory_folder=user_storage.memory_folder,
             )
     else:
         # INSTANCIRAMO NOV SESSION
         session = Session(
             session_folder=user_storage.session_folder,
-            workspace_folder=config['workspace'],
+            workspace_folder=AGENT_WORKSPACE,
             memory_folder=user_storage.memory_folder,
         )
     

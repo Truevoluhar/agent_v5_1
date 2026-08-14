@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Session {{ session_id }}</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; background: #111827; color: #f9fafb; }
+      .panel { background: #1f2937; border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+      .message { border-bottom: 1px solid #374151; padding: 10px 0; }
+      .role { font-weight: bold; color: #93c5fd; }
+      pre { white-space: pre-wrap; word-break: break-word; }
+      a { color: #93c5fd; text-decoration: none; }
+      textarea, input, select { width: 100%; border-radius: 8px; padding: 8px; margin: 4px 0; }
+      button { background: #2563eb; color: white; border: none; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+      .danger { background: #dc2626; }
+      form.inline { display: inline; }
+      details { margin-top: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <h1>Session history: {{ session_id }}</h1>
+      <p><a href="/?username={{ username }}">Back to dashboard</a></p>
+      <form method="post" action="/sessions/{{ session_id }}/summary">
+        <input type="hidden" name="username" value="{{ username }}" />
+        <label>Summary</label>
+        <input type="text" name="summary" placeholder="Set a session summary" />
+        <button type="submit">Save summary</button>
+      </form>
+    </div>
+
+    <div class="panel">
+      {% for message in messages %}
+        <div class="message">
+          <div class="role">{{ message.role }} <span style="color:#9ca3af; font-weight: normal;">(#{{ message._message_id }})</span></div>
+          <pre>{{ message.content if message.content is not none else message }}</pre>
+          <details>
+            <summary>Edit / delete</summary>
+            <form method="post" action="/sessions/{{ session_id }}/messages/{{ message._message_id }}/update">
+              <input type="hidden" name="username" value="{{ username }}" />
+              <textarea name="content" rows="3">{{ message.content if message.content is not none else '' }}</textarea>
+              <button type="submit">Save</button>
+            </form>
+            <form class="inline" method="post" action="/sessions/{{ session_id }}/messages/{{ message._message_id }}/delete" onsubmit="return confirm('Delete this message?')">
+              <input type="hidden" name="username" value="{{ username }}" />
+              <button type="submit" class="danger">Delete message</button>
+            </form>
+          </details>
+        </div>
+      {% else %}
+        <p>No messages found for this session.</p>
+      {% endfor %}
+    </div>
+
+    <div class="panel">
+      <h2>Add message</h2>
+      <form method="post" action="/sessions/{{ session_id }}/messages/add">
+        <input type="hidden" name="username" value="{{ username }}" />
+        <label>Role</label>
+        <select name="role">
+          <option value="user">user</option>
+          <option value="assistant">assistant</option>
+          <option value="system">system</option>
+        </select>
+        <label>Content</label>
+        <textarea name="content" rows="4" required></textarea>
+        <button type="submit">Add message</button>
+      </form>
+    </div>
+  </body>
+</html>
+

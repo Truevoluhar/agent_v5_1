@@ -8,27 +8,37 @@
       .panel { background: #1f2937; border-radius: 12px; padding: 18px; margin-bottom: 18px; }
       textarea { width: 100%; min-height: 120px; border-radius: 10px; padding: 10px; }
       button { background: #2563eb; color: white; border: none; border-radius: 8px; padding: 10px 16px; cursor: pointer; }
+      .danger { background: #dc2626; }
       a { color: #93c5fd; text-decoration: none; }
       table { width: 100%; border-collapse: collapse; }
       th, td { text-align: left; padding: 10px; border-bottom: 1px solid #374151; }
       .muted { color: #9ca3af; }
+      .chip { display: inline-block; margin-right: 8px; padding: 6px 10px; border-radius: 8px; background: #374151; }
+      form.inline { display: inline; }
     </style>
   </head>
   <body>
     <div class="panel">
-      <h1>Agent Browser Control</h1>
-      <form method="post" action="/sessions/run">
-        <input type="hidden" name="username" value="{{ username }}" />
-        <label for="prompt">Initial prompt</label>
-        <textarea name="prompt" id="prompt" placeholder="Describe the task you want the agent to perform"></textarea>
-        <div style="margin-top: 12px;">
-          <button type="submit">Run agent</button>
-        </div>
-      </form>
+      <h1>Agent Data Client</h1>
+      <p class="muted">
+        Full read/write console over the shared bind-mounted data
+        (sessions, memory, workspace, resources). To start a new agent run,
+        use the agent container's CLI (<code>agentv5 --username {{ username }} ...</code>).
+      </p>
+      <p>
+        Browse files:
+        {% for r in roots %}
+          <a class="chip" href="/files/{{ r }}">{{ r }}</a>
+        {% endfor %}
+      </p>
     </div>
 
     <div class="panel">
       <h2>Sessions</h2>
+      <form method="post" action="/sessions/create" style="margin-bottom: 12px;">
+        <input type="hidden" name="username" value="{{ username }}" />
+        <button type="submit">+ New session</button>
+      </form>
       <table>
         <thead>
           <tr>
@@ -36,6 +46,7 @@
             <th>Created</th>
             <th>Messages</th>
             <th>Latest</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -45,10 +56,16 @@
               <td>{{ session.created_at or "unknown" }}</td>
               <td>{{ session.message_count }}</td>
               <td>{{ session.latest_role or "-" }}: {{ session.latest_content or "-" }}</td>
+              <td>
+                <form class="inline" method="post" action="/sessions/{{ session.id }}/delete" onsubmit="return confirm('Delete session {{ session.id }}?')">
+                  <input type="hidden" name="username" value="{{ username }}" />
+                  <button type="submit" class="danger">Delete</button>
+                </form>
+              </td>
             </tr>
           {% else %}
             <tr>
-              <td colspan="4" class="muted">No sessions yet.</td>
+              <td colspan="5" class="muted">No sessions yet.</td>
             </tr>
           {% endfor %}
         </tbody>
@@ -56,3 +73,4 @@
     </div>
   </body>
 </html>
+
