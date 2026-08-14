@@ -1,5 +1,5 @@
 import json
-from typing import Any, Union
+from typing import Any, Callable, Union
 
 from openai import OpenAI
 
@@ -209,7 +209,7 @@ class GenericAgent:
         return response_tools
 
 
-    def chat(self, messages: list[dict], session: Session) -> str:
+    def chat(self, messages: list[dict], session: Session, emit: Callable[[str, dict], None] | None = None) -> str:
         chat_tools = get_tool_schemas()
         tools = self._to_responses_tools(chat_tools)
 
@@ -283,6 +283,9 @@ class GenericAgent:
                 }
                 session.add_message(assistant_message)
 
+                if emit is not None:
+                    emit("agent.message.completed", {"agent": self.name, "content": final_text})
+
                 return final_text
 
             tool_outputs: list[dict[str, Any]] = []
@@ -301,6 +304,8 @@ class GenericAgent:
                     }
                 else:
                     print(f"[{self.name}]: Tool call: {tool_name}")
+                    if emit is not None:
+                        emit("tool.started", {"agent": self.name, "tool": tool_name})
 
                     try:
                         tool_result = execute_registered_tool(
@@ -308,12 +313,16 @@ class GenericAgent:
                             tool_name=tool_name,
                             tool_input=arguments,
                         )
+                        if emit is not None:
+                            emit("tool.completed", {"agent": self.name, "tool": tool_name, "ok": True})
                     except Exception as exc:
                         # Return the error to the model so it can recover,
                         # select another tool, or explain the failure.
                         tool_result = {
                             "error": f"{type(exc).__name__}: {exc}"
                         }
+                        if emit is not None:
+                            emit("tool.completed", {"agent": self.name, "tool": tool_name, "ok": False})
 
                 serialized_result = self.context_guard.trim_tool_output(tool_result)
 

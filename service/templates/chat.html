@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Chat</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <div class="topbar">
+        <div class="brand"><span class="dot"></span> Agent Chat</div>
+        <a class="chip" href="http://localhost:8000/?username={{ username }}">Data client &rarr;</a>
+      </div>
+
+      <div class="panel">
+        <div class="row">
+          <div>
+            <label for="username">Username</label>
+            <input id="username" value="{{ username }}" />
+          </div>
+          <div>
+            <label for="session">Session</label>
+            <select id="session">
+              <option value="">+ New session</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="prompt-file">Load prompt from file</label>
+            <select id="prompt-file">
+              <option value="">(none)</option>
+            </select>
+          </div>
+          <div>
+            <label for="schema-file">Response schema</label>
+            <select id="schema-file">
+              <option value="">Default (response_schema.json)</option>
+            </select>
+          </div>
+        </div>
+        <div class="status-line"><span class="status-dot" id="status-dot"></span> <span id="status">Idle.</span></div>
+      </div>
+
+      <div class="panel">
+        <div id="chat"></div>
+      </div>
+
+      <div class="panel">
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" rows="3" placeholder="Describe what you want the agent to do..."></textarea>
+        <button id="send">Start run</button>
+      </div>
+
+      <div class="panel" id="input-panel" style="display:none;">
+        <p><strong>The agent is asking a question:</strong> <span id="question"></span></p>
+        <input id="answer" placeholder="Your reply" />
+        <button id="answer-send" class="secondary">Send reply</button>
+      </div>
+    </div>
+
+    <script>
+      const chatEl = document.getElementById('chat');
+      const statusEl = document.getElementById('status');
+      const statusDotEl = document.getElementById('status-dot');
+      const inputPanel = document.getElementById('input-panel');
+      const questionEl = document.getElementById('question');
+      const usernameEl = document.getElementById('username');
+      const sessionSelect = document.getElementById('session');
+      const promptFileSelect = document.getElementById('prompt-file');
+      const schemaFileSelect = document.getElementById('schema-file');
+      const promptEl = document.getElementById('prompt');
+
+      let currentRunId = localStorage.getItem('agent_run_id');
+      let lastSequence = parseInt(localStorage.getItem('agent_last_sequence') || '0', 10);
+      let eventSource = null;
+
+      function setStatus(text, tone) {
+        statusEl.textContent = text;
+        statusDotEl.className = 'status-dot' + (tone ? ' ' + tone : '');
+      }
+
+      function addBubble(text, cls) {
+        const div = document.createElement('div');
+        div.className = 'bubble ' + (cls || '');
+        div.textContent = text;
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+
+      function addActivity(text) {
+        const div = document.createElement('div');
+        div.className = 'activity';
+        div.textContent = text;
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+
+      function loadSessions() {
+        const username = usernameEl.value;
+        if (!username) return;
+        fetch('/api/sessions?username=' + encodeURIComponent(username))
+          .then((r) => (r.ok ? r.json() : { sessions: [] }))
+          .then((data) => {
+            sessionSelect.innerHTML = '<option value="">+ New session</option>';
+            (data.sessions || []).forEach((session) => {
+              const opt = document.createElement('option');
+              opt.value = session.id;
+              const label = session.summary || session.created_at || session.id;
+              opt.textContent = label.length > 60 ? label.slice(0, 60) + '...' : label;
+              sessionSelect.appendChild(opt);
+            });
+          });
+      }
+
+      function loadPromptFiles() {
+        fetch('/api/resources/prompts')
+          .then((r) => r.json())
+          .then((data) => {
+            promptFileSelect.innerHTML = '<option value="">(none)</option>';
+            (data.files || []).forEach((name) => {
+              const opt = document.createElement('option');
+              opt.value = name;
+              opt.textContent = name;
+              promptFileSelect.appendChild(opt);
+            });
+          });
+      }
+
+      function loadSchemaFiles() {
+        fetch('/api/resources/schemas')
+          .then((r) => r.json())
+          .then((data) => {
+            schemaFileSelect.innerHTML = '<option value="">Default (response_schema.json)</option>';
+            (data.files || []).forEach((name) => {
+              const opt = document.createElement('option');
+              opt.value = name;
+              opt.textContent = name;
+              schemaFileSelect.appendChild(opt);
+            });
+          });
+      }
+
+      promptFileSelect.addEventListener('change', () => {
+        const name = promptFileSelect.value;
+        if (!name) return;
+        fetch('/api/resources/prompts/' + encodeURIComponent(name))
+          .then((r) => r.json())
+          .then((data) => { promptEl.value = data.content || ''; });
+      });
+
+      usernameEl.addEventListener('change', loadSessions);
+
+      function handleEvent(type, data) {
+        if (type === 'orchestrator.decision') {
+          addActivity('Orchestrator: ' + data.action + ' - ' + (data.description || ''));
+        } else if (type === 'agent.delegated') {
+          addActivity('Delegated to ' + data.agent);
+        } else if (type === 'tool.started') {
+          addActivity('Running tool: ' + data.tool + ' (' + data.agent + ')');
+        } else if (type === 'tool.completed') {
+          addActivity((data.ok ? 'Tool completed: ' : 'Tool failed: ') + data.tool);
+        } else if (type === 'agent.message.completed') {
+          addBubble('[' + data.agent + '] ' + data.content);
+        } else if (type === 'response.started') {
+          addActivity('Preparing final response...');
+        } else if (type === 'input.required') {
+          questionEl.textContent = data.question || '';
+          inputPanel.style.display = 'block';
+        } else if (type === 'run.completed') {
+          setStatus('Run completed.', 'ok');
+          inputPanel.style.display = 'none';
+          fetchResult();
+        } else if (type === 'run.failed') {
+          addBubble('Run failed: ' + (data.error || 'unknown error'), 'error');
+          setStatus('Run failed.', 'error');
+        } else if (type === 'run.cancelled') {
+          setStatus('Run cancelled.', 'error');
+        } else if (type === 'run.started') {
+          setStatus('Running...', 'active');
+        }
+      }
+
+      function fetchResult() {
+        fetch('/api/runs/' + currentRunId).then(r => r.json()).then(data => {
+          if (data.result) {
+            addBubble(JSON.stringify(data.result, null, 2), 'final');
+          }
+          loadSessions();
+        });
+      }
+
+      function connectEvents(runId) {
+        if (eventSource) eventSource.close();
+        eventSource = new EventSource('/api/runs/' + runId + '/events?after_sequence=' + lastSequence);
+
+        eventSource.onmessage = () => {}; // default channel unused; we use named events below
+        eventSource.onerror = () => {
+          setStatus('Lost connection to run ' + runId + ' (server error or run not found).', 'error');
+        };
+
+        [
+          'run.started', 'step.started', 'orchestrator.started', 'orchestrator.decision',
+          'agent.delegated', 'agent.message.delta', 'agent.message.completed',
+          'tool.started', 'tool.completed', 'input.required', 'response.started',
+          'run.completed', 'run.failed', 'run.cancelled', 'stream.end',
+        ].forEach((type) => {
+          eventSource.addEventListener(type, (event) => {
+            const payload = JSON.parse(event.data);
+            if (payload.sequence) {
+              lastSequence = payload.sequence;
+              localStorage.setItem('agent_last_sequence', String(lastSequence));
+            }
+            if (type === 'stream.end') {
+              eventSource.close();
+              if (payload.status === 'failed') {
+                addBubble('Run failed: ' + (payload.error || 'unknown error (no events were emitted - check agent-api logs)'), 'error');
+                setStatus('Run failed.', 'error');
+              } else if (payload.status === 'cancelled') {
+                setStatus('Run cancelled.', 'error');
+              }
+              return;
+            }
+            handleEvent(type, payload.data || {});
+          });
+        });
+      }
+
+      document.getElementById('send').addEventListener('click', () => {
+        const username = usernameEl.value;
+        const prompt = promptEl.value;
+        if (!prompt) return;
+
+        addBubble(prompt, 'user');
+        setStatus('Starting run...', 'active');
+
+        fetch('/api/runs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username,
+            prompt,
+            session_id: sessionSelect.value || null,
+            response_schema: schemaFileSelect.value ? 'resources/' + schemaFileSelect.value : null,
+          }),
+        })
+          .then(async (r) => {
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) {
+              throw new Error(data.detail || ('HTTP ' + r.status));
+            }
+            return data;
+          })
+          .then((data) => {
+            currentRunId = data.run_id;
+            lastSequence = 0;
+            localStorage.setItem('agent_run_id', currentRunId);
+            localStorage.setItem('agent_last_sequence', '0');
+            connectEvents(currentRunId);
+          })
+          .catch((err) => {
+            setStatus('Failed to start run.', 'error');
+            addBubble('Error starting run: ' + err.message, 'error');
+          });
+      });
+
+      document.getElementById('answer-send').addEventListener('click', () => {
+        const content = document.getElementById('answer').value;
+        if (!content || !currentRunId) return;
+        addBubble(content, 'user');
+        fetch('/api/runs/' + currentRunId + '/input', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content }),
+        })
+          .then((r) => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            inputPanel.style.display = 'none';
+            document.getElementById('answer').value = '';
+          })
+          .catch((err) => {
+            addBubble('Error sending reply: ' + err.message, 'error');
+          });
+      });
+
+      loadSessions();
+      loadPromptFiles();
+      loadSchemaFiles();
+
+      // Reconnect to an in-flight run after a page refresh.
+      if (currentRunId) {
+        setStatus('Reconnecting to run ' + currentRunId + '...', 'active');
+        connectEvents(currentRunId);
+      }
+    </script>
+  </body>
+</html>
+

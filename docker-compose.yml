@@ -9,8 +9,24 @@ services:
       - AGENT_DATA_ROOT=/data
     volumes:
       - ./data:/data
+    # Optional CLI adapter - one-shot runs. The persistent agent-api service
+    # below is the recommended way to drive the agent loop (see
+    # "Agent GUI Integration.pdf").
     # Example: docker compose run --rm agent --username alice --workspace agent_workspace --interactive false --test false --initial_prompt "..."
     entrypoint: ["agentv5"]
+
+  agent-api:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+    env_file:
+      - .env
+    environment:
+      - AGENT_DATA_ROOT=/data
+    volumes:
+      - ./data:/data
+    ports:
+      - "8100:8100"
 
   client:
     build:
@@ -22,3 +38,4 @@ services:
       - ./data:/data
     ports:
       - "8000:8000"
+

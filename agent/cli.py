@@ -1,6 +1,5 @@
-import os
-import json
 import argparse
+import json
 from pathlib import Path
 
 import yaml
@@ -8,52 +7,14 @@ from dotenv import load_dotenv
 import questionary
 
 from agent.test import run_tests
-
-from agent.generic_agent import GenericAgent
-from agent.orchestrator_agent import OrchestratorAgent
-from agent.response_agent import ResponseAgent
-from agent.session import Session
-from agent.user_storage import user_storage_paths
+from agent.events import ConsoleEventSink
 from agent.paths import DATA_ROOT
+from agent.runner import AgentRunner, RunRequest
+from agent.user_storage import user_storage_paths
 
 
 AGENT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = str(AGENT_ROOT / "config.yml")
-DEFAULT_PLAN_FILENAME = "PLAN.md"
-MAX_PLAN_CONTEXT_CHARS = 12_000
-
-
-def _read_active_plan_context(workspace_path: str, filename: str = DEFAULT_PLAN_FILENAME) -> tuple[str | None, dict]:
-    plan_path = Path(workspace_path) / filename
-    if not plan_path.exists():
-        return None, {"exists": False, "path": str(plan_path)}
-
-    content = plan_path.read_text(encoding="utf-8")
-    metadata = {
-        "exists": True,
-        "path": str(plan_path),
-        "chars": len(content),
-        "truncated": False,
-    }
-
-    if len(content) > MAX_PLAN_CONTEXT_CHARS:
-        metadata["truncated"] = True
-        content = content[:MAX_PLAN_CONTEXT_CHARS] + "\n\n[TRUNCATED PLAN CONTEXT]"
-
-    return content, metadata
-
-
-def _find_agent_by_name(agents: list[GenericAgent], agent_name: str) -> GenericAgent | None:
-    for agent in agents:
-        if agent.name == agent_name:
-            return agent
-    return None
-
-
-def _planner_name(agents: list[GenericAgent]) -> str | None:
-    planner_agent = _find_agent_by_name(agents, "PLANNER")
-    return planner_agent.name if planner_agent is not None else None
-
 
 
 def main():
@@ -100,20 +61,17 @@ def main():
             "If provided, it overrides context_limits.max_input_chars from config."
         ),
     )
-    
-    
+
     args = parser.parse_args()
 
     # Naložimo okoljske spremenljivke iz .env datoteke
     load_dotenv()
-    
 
     if args.test == "true":
         run_tests()
         return
 
-
-    # CONFIG LOAD
+    # CONFIG LOAD (only needed here to list/select existing sessions before delegating to AgentRunner)
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
@@ -125,57 +83,22 @@ def main():
         )
     except ValueError as exc:
         parser.error(str(exc))
-        
-    
+
     # Parsamo user prompt
     # Če se začne z file=, preberemo iz datoteke
-    if args.initial_prompt.startswith("file="):
+    initial_prompt = args.initial_prompt
+    if initial_prompt.startswith("file="):
         print("Berem uporabnikov prompt iz datoteke ...")
         try:
-            filename = args.initial_prompt.split("=")[1]
+            filename = initial_prompt.split("=")[1]
             with open(DATA_ROOT / "resources" / "user_prompts" / filename, "r", encoding="utf-8") as f:
-                prompt_content = f.read()
-            args.initial_prompt = prompt_content
+                initial_prompt = f.read()
         except Exception as e:
             print(e)
             return
 
-    
-
-    agents_config = config["agents"]
-    orchestrator_config = config['orchestrator_agent']
-    response_agent_config = config.get('response_agent')
-    agent_resources = str(DATA_ROOT / config['agents_resources'])
-    context_limits = dict(config.get("context_limits", {}) or {})
-
-    if args.max_context_chars is not None:
-        context_limits["max_input_chars"] = int(args.max_context_chars)
-
-    max_input_chars = int(context_limits.get("max_input_chars", 120000))
-    orchestrator_context_budget = max(4000, int(max_input_chars * 0.45))
-    delegated_context_budget = max(4000, int(max_input_chars * 0.50))
-    response_context_budget = max(6000, int(max_input_chars * 0.60))
-
-    config_response_schema = config.get('response_schema_path', 'resources/response_schema.json')
-    response_schema_source = args.response_schema or config_response_schema
-    if isinstance(response_schema_source, str):
-        raw_schema = response_schema_source.strip()
-        if raw_schema.startswith('{') or raw_schema.startswith('['):
-            response_schema_source = raw_schema
-        else:
-            response_schema_source = str(DATA_ROOT / raw_schema)
-
-    # Nastavimo workspace folder
-    if config["workspace"]:
-        AGENT_WORKSPACE = str(Path(DATA_ROOT / config["workspace"]))
-        Path(f"{AGENT_WORKSPACE}/plan").mkdir(parents=True, exist_ok=True)
-    else:
-        AGENT_WORKSPACE = str(Path(DATA_ROOT))
-        Path(f"{AGENT_WORKSPACE}/plan").mkdir(parents=True, exist_ok=True)
-
-
-    
     # Ponudimo opcije za session
+    session_id = None
     if args.interactive == "true" and _check_existing_sessions(user_storage.session_folder):
         options = [
             "Ustvari novo sejo",
@@ -187,242 +110,28 @@ def main():
         if option == "Nalozi obstojeco sejo":
             existing_sessions = _get_existing_sessions(user_storage.session_folder)
             chosen_session = questionary.select("Izberi sejo: ", choices=existing_sessions).ask()
+            session_id = _get_id_for_existing_session(chosen_session)
 
-            session = Session(
-                id=_get_id_for_existing_session(chosen_session),
-                session_folder=user_storage.session_folder,
-                workspace_folder=AGENT_WORKSPACE,
-                memory_folder=user_storage.memory_folder,
-            )
-        else:
-            # INSTANCIRAMO NOV SESSION
-            session = Session(
-                session_folder=user_storage.session_folder,
-                workspace_folder=AGENT_WORKSPACE,
-                memory_folder=user_storage.memory_folder,
-            )
-    else:
-        # INSTANCIRAMO NOV SESSION
-        session = Session(
-            session_folder=user_storage.session_folder,
-            workspace_folder=AGENT_WORKSPACE,
-            memory_folder=user_storage.memory_folder,
-        )
-    
-    
-    
-
-    # INSTANCIRAMO GENERIČNE AGENTE
-    agents: list[GenericAgent] = []
-    for agent_id, agent_data in agents_config.items():
-        print(f"[CLI] Loading Agent => ID: {agent_id}, NAME: {agent_data['name']}")
-        agent = GenericAgent(
-            id=agent_id,
-            name=agent_data['name'],
-            model=agent_data['model'],
-            temperature=agent_data['temperature'],
-            base_url=agent_data['base_url'],
-            api_key=os.getenv(agent_data['api_key']),
-            resources_path=agent_resources,
-            workspace_path=AGENT_WORKSPACE,
-            context_limits=context_limits,
-        )
-        agents.append(agent)
-
-
-    
-    # INSTANCIRAMO ORCHESTRATOR AGENTA, ki odloča o poteku
-    available_agents = []
-    for agent in agents:
-        available_agents.append(agent.name)
-    
-    orchestrator_agent = OrchestratorAgent(
-        id="orchestrator_agent",
-        name=orchestrator_config['name'],
-        model=orchestrator_config['model'],
-        temperature=orchestrator_config['temperature'],
-        base_url=orchestrator_config['base_url'],
-        api_key=os.getenv(orchestrator_config['api_key']),
-        resources_path=agent_resources,
-        workspace_path=AGENT_WORKSPACE,
-        available_agents=available_agents,
-        context_limits=context_limits,
+    request = RunRequest(
+        username=args.username,
+        prompt=initial_prompt,
+        workspace=args.workspace,
+        session_id=session_id,
+        response_schema=args.response_schema,
+        max_context_chars=args.max_context_chars,
     )
 
-    response_agent = None
-    if response_agent_config:
-        response_agent = ResponseAgent(
-            id="response_agent",
-            name=response_agent_config['name'],
-            model=response_agent_config['model'],
-            temperature=response_agent_config['temperature'],
-            base_url=response_agent_config['base_url'],
-            api_key=os.getenv(response_agent_config['api_key']),
-            resources_path=agent_resources,
-            workspace_path=AGENT_WORKSPACE,
-            response_schema_source=response_schema_source,
-            context_limits=context_limits,
-        )
+    runner = AgentRunner(config_path=CONFIG_PATH)
+    result = runner.run(
+        request,
+        emit=ConsoleEventSink(),
+        wait_for_input=lambda question: input(f"{question}\nRespond to agent: "),
+    )
 
-
-    # Setup prvega sporocila
-    messages = [
-            { "role": "user", "content": args.initial_prompt }
-    ]
-    session.add_message(messages[0])
-
-
-    
-
-
-
-
-
-    ##############
-    #            #
-    # AGENT LOOP #
-    #            #
-    ##############
-
-    for step in range(config["max_steps"]):
-        print(f"Running step {step} ...")
-
-        recent_query = next(
-            (
-                message.get("content")
-                for message in reversed(session.messages)
-                if message.get("role") == "user" and message.get("content")
-            ),
-            None,
-        )
-        historical_context = ""
-        if recent_query:
-            retrieval_limit = Session.suggest_retrieval_limit(
-                context_budget_chars=orchestrator_context_budget // 5,
-                min_limit=1,
-                max_limit=6,
-                chars_per_match=450,
-            )
-            historical_context = session.format_retrieval_context(
-                query=recent_query,
-                limit=retrieval_limit,
-                max_chars=max(600, orchestrator_context_budget // 6),
-            )
-
-        plan_text, _ = _read_active_plan_context(AGENT_WORKSPACE)
-
-        orchestrator_messages = session.get_bounded_context(
-            max_recent_messages=12,
-            max_context_chars=orchestrator_context_budget,
-        )
-        if plan_text is not None:
-            plan_context_line = (
-                "Active plan (source of truth). Follow this plan and update it instead of creating a separate one.\n\n"
-                f"{plan_text}"
-            )
-            orchestrator_messages.insert(
-                0,
-                {
-                    "role": "system",
-                    "content": plan_context_line,
-                },
-            )
-        else:
-            orchestrator_messages.insert(
-                0,
-                {
-                    "role": "system",
-                    "content": (
-                        "No active plan file found at PLAN.md. "
-                        "Delegate to PLANNER to create one before substantial implementation tasks."
-                    ),
-                },
-            )
-
-        if historical_context:
-            orchestrator_messages.insert(
-                0,
-                {
-                    "role": "system",
-                    "content": historical_context,
-                },
-            )
-
-        orchestrator_response = orchestrator_agent.chat_structured(
-            messages=orchestrator_messages,
-        )
-
-        session.add_message({"role": "assistant", "content": orchestrator_response.description})
-
-        if orchestrator_response.action == "delegate_to_agent":
-            delegated_name = orchestrator_response.agent_name
-            planner = _planner_name(agents)
-
-            # Guardrail: when plan is missing, force a planner pass first.
-            if plan_text is None and planner is not None and delegated_name != planner:
-                delegated_name = planner
-                session.add_message(
-                    {
-                        "role": "system",
-                        "content": (
-                            "Delegation overridden to PLANNER because no active PLAN.md exists yet. "
-                            "Create/refresh PLAN.md first."
-                        ),
-                    }
-                )
-
-            delegated_agent = _find_agent_by_name(agents, delegated_name)
-            if delegated_agent is not None:
-                agent_messages = session.get_bounded_context(
-                    max_recent_messages=12,
-                    max_context_chars=delegated_context_budget,
-                )
-
-                if plan_text is not None:
-                    agent_messages.insert(
-                        0,
-                        {
-                            "role": "system",
-                            "content": (
-                                "Execution must follow active PLAN.md. "
-                                "If work changes scope, update PLAN.md first, then continue."
-                            ),
-                        },
-                    )
-
-                delegated_agent.chat(agent_messages, session)
-
-        if orchestrator_response.action == "ask_user":
-            user_response = input("Respond to agent: ")
-            session.add_message({"role": "user", "content": user_response})
-
-        should_finalize = orchestrator_response.action == "finish" or (
-            step == config["max_steps"] - 1 and orchestrator_response.action != "ask_user"
-        )
-
-        if should_finalize:
-            if response_agent is not None:
-                final_messages = session.get_bounded_context(
-                    max_recent_messages=20,
-                    max_context_chars=response_context_budget,
-                )
-                final_messages.append(
-                    {
-                        "role": "user",
-                        "content": "Summarize the completed work in the required JSON structure.",
-                    }
-                )
-                response_agent.chat_structured(
-                    messages=final_messages,
-                    schema_source=response_schema_source,
-                    session=session,
-                )
-            return
-
-
-
-
-
+    if result.status == "failed":
+        print(f"[CLI] Run failed: {result.error}")
+    elif result.final_response is not None:
+        print(result.final_response.model_dump_json(indent=2))
 
 
 def _get_existing_sessions(sessions_path: str):
