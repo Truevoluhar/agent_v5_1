@@ -13,11 +13,11 @@ from agent.generic_agent import GenericAgent
 from agent.orchestrator_agent import OrchestratorAgent
 from agent.response_agent import ResponseAgent
 from agent.session import Session
+from agent.paths import PROJECT_ROOT, AGENT_ROOT, shared_root
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-AGENT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = str(AGENT_ROOT / "config.yml")
+SHARED_ROOT = shared_root()
 DEFAULT_PLAN_FILENAME = "PLAN.md"
 MAX_PLAN_CONTEXT_CHARS = 12_000
 
@@ -118,7 +118,7 @@ def main():
         print("Berem uporabnikov prompt iz datoteke ...")
         try:
             filename = args.initial_prompt.split("=")[1]
-            with open(f"./resources/user_prompts/{filename}", "r", encoding="utf-8") as f:
+            with open(SHARED_ROOT / "resources" / "user_prompts" / filename, "r", encoding="utf-8") as f:
                 prompt_content = f.read()
             args.initial_prompt = prompt_content
         except Exception as e:
@@ -130,7 +130,7 @@ def main():
     agents_config = config["agents"]
     orchestrator_config = config['orchestrator_agent']
     response_agent_config = config.get('response_agent')
-    agent_resources = str(PROJECT_ROOT / config['agents_resources'])
+    agent_resources = str(SHARED_ROOT / config['agents_resources'])
     context_limits = dict(config.get("context_limits", {}) or {})
 
     if args.max_context_chars is not None:
@@ -148,20 +148,22 @@ def main():
         if raw_schema.startswith('{') or raw_schema.startswith('['):
             response_schema_source = raw_schema
         else:
-            response_schema_source = str(PROJECT_ROOT / raw_schema)
+            response_schema_source = str(SHARED_ROOT / raw_schema)
 
     # Nastavimo workspace folder
     if config["workspace"]:
-        AGENT_WORKSPACE = str(Path(PROJECT_ROOT / config["workspace"]))
+        AGENT_WORKSPACE = str(Path(SHARED_ROOT / config["workspace"]))
         Path(f"{AGENT_WORKSPACE}/plan").mkdir(parents=True, exist_ok=True)
     else:
-        AGENT_WORKSPACE = str(Path(PROJECT_ROOT))
+        AGENT_WORKSPACE = str(Path(SHARED_ROOT))
         Path(f"{AGENT_WORKSPACE}/plan").mkdir(parents=True, exist_ok=True)
 
 
     
+    SESSION_DIR = str(SHARED_ROOT / config['session'])
+
     # Ponudimo opcije za session
-    if args.interactive == "true" and _check_existing_sessions(config['session']):
+    if args.interactive == "true" and _check_existing_sessions(SESSION_DIR):
         options = [
             "Ustvari novo sejo",
             "Nalozi obstojeco sejo"
@@ -170,28 +172,28 @@ def main():
         option = questionary.select("Izberi moznost:", choices=options).ask()
 
         if option == "Nalozi obstojeco sejo":
-            existing_sessions = _get_existing_sessions(config['session'])
+            existing_sessions = _get_existing_sessions(SESSION_DIR)
             chosen_session = questionary.select("Izberi sejo: ", choices=existing_sessions).ask()
 
             session = Session(
                 id=_get_id_for_existing_session(chosen_session),
-                session_folder=config['session'],
-                workspace_folder=config['workspace'],
-                memory_folder=config['memory']
+                session_folder=SESSION_DIR,
+                workspace_folder=AGENT_WORKSPACE,
+                memory_folder=str(SHARED_ROOT / config['memory'])
             )
         else:
             # INSTANCIRAMO NOV SESSION
             session = Session(
-                session_folder=config['session'],
-                workspace_folder=config['workspace'],
-                memory_folder=config['memory']
+                session_folder=SESSION_DIR,
+                workspace_folder=AGENT_WORKSPACE,
+                memory_folder=str(SHARED_ROOT / config['memory'])
             )
     else:
         # INSTANCIRAMO NOV SESSION
         session = Session(
-            session_folder=config['session'],
-            workspace_folder=config['workspace'],
-            memory_folder=config['memory']
+            session_folder=SESSION_DIR,
+            workspace_folder=AGENT_WORKSPACE,
+            memory_folder=str(SHARED_ROOT / config['memory'])
         )
     
     

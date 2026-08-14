@@ -1,0 +1,43 @@
+# Three independent entities that only communicate through a shared bind
+# mount:
+#
+#   AGENT  <-->  BIND MOUNT (resources/session/memory/agent_workspace)  <-->  CLIENT
+#
+# Neither container depends on the other at runtime - they both just read
+# and write files under /shared.
+
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+    image: agentv5-agent:local
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      AGENT_SHARED_ROOT: /shared
+    volumes:
+      - ./resources:/shared/resources
+      - ./agent_workspace:/shared/agent_workspace
+      - ./session:/shared/session
+      - ./memory:/shared/memory
+    ports:
+      - "8000:8000"
+
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    image: agentv5-client:local
+    environment:
+      CLIENT_SHARED_ROOT: /shared
+    volumes:
+      - ./resources:/shared/resources
+      - ./agent_workspace:/shared/agent_workspace
+      - ./session:/shared/session
+      - ./memory:/shared/memory
+    # Runs `sessions` by default; override to run any client subcommand, e.g.:
+    #   docker compose run client ls agent_workspace
+    stdin_open: true
+    tty: true

@@ -12,24 +12,25 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 from agent.session import Session
+from agent.paths import AGENT_ROOT, PROJECT_ROOT, shared_root
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_ROOT / "agent" / "config.yml"
+CONFIG_PATH = AGENT_ROOT / "config.yml"
 
 with CONFIG_PATH.open("r", encoding="utf-8") as file_obj:
     config = yaml.safe_load(file_obj)
 
-SESSION_DIR = (PROJECT_ROOT / config["session"]).resolve()
-WORKSPACE_DIR = (PROJECT_ROOT / config["workspace"]).resolve()
-MEMORY_DIR = (PROJECT_ROOT / config["memory"]).resolve()
+SHARED_ROOT = shared_root()
+SESSION_DIR = (SHARED_ROOT / config["session"]).resolve()
+WORKSPACE_DIR = (SHARED_ROOT / config["workspace"]).resolve()
+MEMORY_DIR = (SHARED_ROOT / config["memory"]).resolve()
 
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Agent Browser Control")
-app.mount("/static", StaticFiles(directory=str(PROJECT_ROOT / "agent" / "static")), name="static")
-templates = Jinja2Templates(directory=str(PROJECT_ROOT / "agent" / "templates"))
+app.mount("/static", StaticFiles(directory=str(AGENT_ROOT / "static")), name="static")
+templates = Jinja2Templates(directory=str(AGENT_ROOT / "templates"))
 
 ACTIVE_RUNS: dict[str, dict[str, Any]] = {}
 
@@ -101,7 +102,7 @@ async def run_session(prompt: str = Form(...)):
 
     process = subprocess.Popen(
         command,
-        cwd=str(PROJECT_ROOT),
+        cwd=str(SHARED_ROOT),
         env=os.environ.copy(),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
