@@ -35,7 +35,7 @@
         <table>
           <thead>
             <tr>
-              <th>Session ID</th>
+              <th>Session</th>
               <th>Created</th>
               <th>Messages</th>
               <th>Latest</th>
@@ -45,7 +45,7 @@
           <tbody>
             {% for session in sessions %}
               <tr>
-                <td data-label="Session"><a href="/sessions/{{ session.id }}?username={{ username }}">{{ session.id }}</a></td>
+                <td data-label="Session"><a href="/sessions/{{ session.id }}?username={{ username }}">{{ session.name }}</a><br /><small class="muted">{{ session.id }}</small></td>
                 <td data-label="Created">{{ session.created_at or "unknown" }}</td>
                 <td data-label="Messages">{{ session.message_count }}</td>
                 <td data-label="Latest">{{ session.latest_role or "-" }}: {{ session.latest_content or "-" }}</td>

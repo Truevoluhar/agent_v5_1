@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import yaml
+from openai import OpenAI
 
+from agent.context_guard import ContextLimits, ContextWindowGuard
 from agent.events import EventEmitter, EventSink
 from agent.generic_agent import GenericAgent
 from agent.orchestrator_agent import OrchestratorAgent
@@ -143,6 +145,14 @@ class AgentRunner:
             workspace_folder=agent_workspace,
             memory_folder=user_storage.memory_folder,
         )
+        if session.is_new:
+            session.set_name(
+                self._generate_session_name(
+                    prompt=request.prompt,
+                    agent_config=orchestrator_config,
+                    context_limits=context_limits,
+                )
+            )
 
         run_id = request.run_id or session.id
         emitter = EventEmitter(run_id=run_id, session_id=session.id, sink=emit)
@@ -223,6 +233,52 @@ class AgentRunner:
         return RunResult(
             run_id=run_id, session_id=session.id, status="completed", final_response=final_response
         )
+
+    @staticmethod
+    def _generate_session_name(
+        *,
+        prompt: str,
+        agent_config: dict[str, Any],
+        context_limits: dict[str, Any],
+    ) -> str:
+        fallback_name = "New chat"
+        guard = ContextWindowGuard(ContextLimits.from_dict(context_limits))
+        input_items = guard.trim_response_input_items(
+            [{"role": "user", "content": prompt}],
+            attempt=1,
+        )
+        if not input_items:
+            return fallback_name
+
+        client_kwargs = {"api_key": os.getenv(agent_config["api_key"])}
+        if agent_config.get("base_url"):
+            client_kwargs["base_url"] = agent_config["base_url"]
+
+        client = OpenAI(**client_kwargs)
+        instructions = (
+            "Create a concise, descriptive title for this new conversation. "
+            "Return only the title, with no quotation marks, markdown, or punctuation at the end. "
+            "Use at most 8 words."
+        )
+        last_error: Exception | None = None
+        for attempt in range(1, guard.limits.max_retries + 1):
+            try:
+                response = client.responses.create(
+                    model=agent_config["model"],
+                    instructions=instructions,
+                    input=guard.trim_response_input_items(input_items, attempt=attempt),
+                    temperature=agent_config.get("temperature", 1.0),
+                )
+                title = " ".join((response.output_text or "").split())[:120]
+                return title or fallback_name
+            except Exception as exc:
+                last_error = exc
+                if not guard.is_context_length_error(exc):
+                    break
+
+        if last_error is not None:
+            print(f"[Session] Could not generate session name: {last_error}")
+        return fallback_name
 
     def _run_loop(
         self,

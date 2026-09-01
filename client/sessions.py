@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT 'New chat',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     workspace_folder TEXT,
     memory_folder TEXT,
@@ -39,6 +40,15 @@ def _connect(session_file: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(session_file)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.executescript(_SCHEMA)
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+    }
+    if "name" not in columns:
+        connection.execute(
+            "ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT 'New chat'"
+        )
     return connection
 
 
@@ -54,7 +64,7 @@ def list_sessions(session_dir: Path) -> List[Dict[str, Any]]:
         try:
             with _connect(session_file) as connection:
                 session_row = connection.execute(
-                    "SELECT created_at, summary FROM sessions WHERE id = ?",
+                    "SELECT name, created_at, summary FROM sessions WHERE id = ?",
                     (session_id,),
                 ).fetchone()
                 message_count = connection.execute(
@@ -71,6 +81,7 @@ def list_sessions(session_dir: Path) -> List[Dict[str, Any]]:
         sessions.append(
             {
                 "id": session_id,
+                "name": session_row["name"] if session_row and session_row["name"] else "New chat",
                 "path": str(session_file),
                 "created_at": session_row["created_at"] if session_row else None,
                 "summary": session_row["summary"] if session_row else None,
@@ -90,7 +101,6 @@ def create_session(session_dir: Path, session_id: Optional[str] = None) -> str:
     session_file = _session_file(session_dir, session_id)
 
     with _connect(session_file) as connection:
-        connection.executescript(_SCHEMA)
         connection.execute(
             "INSERT OR IGNORE INTO sessions (id) VALUES (?)",
             (session_id,),

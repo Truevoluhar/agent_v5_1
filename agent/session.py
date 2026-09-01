@@ -10,6 +10,7 @@ from agent.semantic_memory import SemanticMemoryIndex
 
 class Session:
     id: str
+    name: str
     session_folder: str
     workspace_folder: str
     memory_folder: str
@@ -31,6 +32,8 @@ class Session:
         self.memory_folder = str(Path(memory_folder))
 
         self.db_path = Path(self.session_folder) / f"session_{self.id}.sqlite3"
+        legacy_jsonl_path = Path(self.session_folder) / f"session_{self.id}.jsonl"
+        self.is_new = not self.db_path.exists() and not legacy_jsonl_path.exists()
         self.semantic_index = SemanticMemoryIndex(persist_path=self.memory_folder)
 
         self.create_session_folder()
@@ -44,6 +47,7 @@ class Session:
         if not self._has_session_record():
             self._insert_session_record()
 
+        self.name = self._load_name()
         self.messages = self._load_messages_from_db()
 
     def _ensure_storage(self) -> None:
@@ -75,6 +79,7 @@ class Session:
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL DEFAULT 'New chat',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     workspace_folder TEXT,
                     memory_folder TEXT,
@@ -102,6 +107,14 @@ class Session:
                 ON messages(session_id, id);
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "name" not in columns:
+                connection.execute(
+                    "ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT 'New chat'"
+                )
 
     def _has_session_record(self) -> bool:
         with self._open_connection() as connection:
@@ -123,15 +136,32 @@ class Session:
         with self._open_connection() as connection:
             connection.execute(
                 """
-                INSERT INTO sessions (id, workspace_folder, memory_folder, summary)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO sessions (id, name, workspace_folder, memory_folder, summary)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     workspace_folder = excluded.workspace_folder,
                     memory_folder = excluded.memory_folder,
                     summary = excluded.summary
                 """,
-                (self.id, self.workspace_folder, self.memory_folder, None),
+                (self.id, "New chat", self.workspace_folder, self.memory_folder, None),
             )
+
+    def _load_name(self) -> str:
+        with self._open_connection() as connection:
+            row = connection.execute(
+                "SELECT name FROM sessions WHERE id = ?",
+                (self.id,),
+            ).fetchone()
+        return str(row["name"]) if row and row["name"] else "New chat"
+
+    def set_name(self, name: str) -> None:
+        normalized_name = " ".join(name.split())[:120] or "New chat"
+        with self._open_connection() as connection:
+            connection.execute(
+                "UPDATE sessions SET name = ? WHERE id = ?",
+                (normalized_name, self.id),
+            )
+        self.name = normalized_name
 
     def _load_messages_from_db(self) -> List[Dict[str, Any]]:
         with self._open_connection() as connection:

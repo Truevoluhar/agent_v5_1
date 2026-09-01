@@ -24,6 +24,7 @@ class SessionSqliteTests(unittest.TestCase):
                 workspace_folder=str(workspace_dir),
                 memory_folder=str(memory_dir),
             )
+            session.set_name("Deployment investigation")
 
             session.add_message({"role": "user", "content": "hello"})
             session.add_message({"role": "assistant", "content": "world"})
@@ -37,6 +38,8 @@ class SessionSqliteTests(unittest.TestCase):
 
             messages = reloaded.get_messages_for_agent()
 
+            self.assertEqual(reloaded.name, "Deployment investigation")
+            self.assertEqual(reloaded.id, session.id)
             self.assertEqual([msg["role"] for msg in messages], ["user", "assistant"])
             self.assertEqual(messages[0]["content"], "hello")
             self.assertEqual(messages[1]["content"], "world")

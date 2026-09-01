@@ -107,7 +107,7 @@
             (data.sessions || []).forEach((session) => {
               const opt = document.createElement('option');
               opt.value = session.id;
-              const label = session.summary || session.created_at || session.id;
+              const label = session.name || session.summary || session.created_at || session.id;
               opt.textContent = label.length > 60 ? label.slice(0, 60) + '...' : label;
               sessionSelect.appendChild(opt);
             });

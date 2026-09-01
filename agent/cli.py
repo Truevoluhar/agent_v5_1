@@ -1,5 +1,6 @@
 import argparse
 import json
+import sqlite3
 from pathlib import Path
 
 import yaml
@@ -109,8 +110,7 @@ def main():
 
         if option == "Nalozi obstojeco sejo":
             existing_sessions = _get_existing_sessions(user_storage.session_folder)
-            chosen_session = questionary.select("Izberi sejo: ", choices=existing_sessions).ask()
-            session_id = _get_id_for_existing_session(chosen_session)
+            session_id = questionary.select("Izberi sejo: ", choices=existing_sessions).ask()
 
     request = RunRequest(
         username=args.username,
@@ -156,8 +156,10 @@ def _get_existing_sessions(sessions_path: str):
 
             if session_files:
                 sessions = []
-                for s in session_files:
-                    sessions.append(str(s.stem))
+                for session_file in session_files:
+                    session_id = session_file.stem.removeprefix("session_")
+                    session_name = _get_session_name(session_file, session_id)
+                    sessions.append(questionary.Choice(f"{session_name} ({session_id[:8]})", value=session_id))
                 return sessions
 
             else:
@@ -199,8 +201,20 @@ def _check_existing_sessions(sessions_path: str) -> bool:
         return False
 
 
-def _get_id_for_existing_session(session_name: str) -> str:
-    return session_name.split("_")[1]
+def _get_session_name(session_file: Path, session_id: str) -> str:
+    if session_file.suffix != ".sqlite3":
+        return "New chat"
+
+    try:
+        with sqlite3.connect(session_file) as connection:
+            row = connection.execute(
+                "SELECT name FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+    except Exception:
+        return "New chat"
+
+    return row[0] if row and row[0] else "New chat"
 
 
 def _get_existing_session_messages(sessions_path: str, session_name: str) -> list[dict]:
