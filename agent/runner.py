@@ -83,6 +83,10 @@ def _planner_name(agents: list[GenericAgent]) -> str | None:
     return planner_agent.name if planner_agent is not None else None
 
 
+def _configured_base_url(agent_config: dict[str, Any]) -> str:
+    return os.getenv("BIFROST_BASE_URL") or agent_config.get("base_url", "")
+
+
 class AgentRunner:
     """Loads config once and executes runs against it."""
 
@@ -166,7 +170,7 @@ class AgentRunner:
                     name=agent_data["name"],
                     model=agent_data["model"],
                     temperature=agent_data["temperature"],
-                    base_url=agent_data["base_url"],
+                    base_url=_configured_base_url(agent_data),
                     api_key=os.getenv(agent_data["api_key"]),
                     resources_path=agent_resources,
                     workspace_path=agent_workspace,
@@ -181,7 +185,7 @@ class AgentRunner:
             name=orchestrator_config["name"],
             model=orchestrator_config["model"],
             temperature=orchestrator_config["temperature"],
-            base_url=orchestrator_config["base_url"],
+            base_url=_configured_base_url(orchestrator_config),
             api_key=os.getenv(orchestrator_config["api_key"]),
             resources_path=agent_resources,
             workspace_path=agent_workspace,
@@ -196,7 +200,7 @@ class AgentRunner:
                 name=response_agent_config["name"],
                 model=response_agent_config["model"],
                 temperature=response_agent_config["temperature"],
-                base_url=response_agent_config["base_url"],
+                base_url=_configured_base_url(response_agent_config),
                 api_key=os.getenv(response_agent_config["api_key"]),
                 resources_path=agent_resources,
                 workspace_path=agent_workspace,
@@ -251,8 +255,9 @@ class AgentRunner:
             return fallback_name
 
         client_kwargs = {"api_key": os.getenv(agent_config["api_key"])}
-        if agent_config.get("base_url"):
-            client_kwargs["base_url"] = agent_config["base_url"]
+        base_url = _configured_base_url(agent_config)
+        if base_url:
+            client_kwargs["base_url"] = base_url
 
         client = OpenAI(**client_kwargs)
         instructions = (

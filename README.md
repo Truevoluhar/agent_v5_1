@@ -28,7 +28,7 @@ V skladu s faznim načrtom iz PDF-ja naslednji koraki za utrditev sistema nameno
 
 ```bash
 docker compose build
-docker compose up -d agent-api client   # klepetalni UI: http://localhost:8100/?username=jon
+docker compose up -d bifrost agent-api client   # klepetalni UI: http://localhost:8100/?username=jon
                                          # nadzorna plošča podatkov: http://localhost:8000/?username=jon
 docker compose run --rm agent --username jon --workspace agent_workspace --interactive false --test false --initial_prompt "..."
 ```
@@ -47,6 +47,21 @@ python -m client.cli sessions-list --username jon
 python -m client.api      # nadzorna plošča podatkov na http://localhost:8000/?username=jon
 python -m service.api     # klepetalni UI + API za zagone na http://localhost:8100/?username=jon
 ```
+
+### Bifrost gateway
+
+All agent LLM requests use Bifrost's OpenAI-compatible API at
+`http://localhost:8080/v1`. Set `BIFROST_API_KEY` in `.env` for the gateway
+credential before starting the agent or `agent-api`. Configure each upstream
+provider credential, such as `OPENAI_API_KEY`, on the Bifrost gateway itself.
+Docker Compose starts Bifrost at `bifrost:8080` and applies that address to the
+agent containers automatically.
+
+Copy `.env.example` to `.env` and replace its placeholder values before using
+Docker Compose.
+
+For a Bifrost instance on another host, change every agent `base_url` in
+`agent/config.yml` to that instance's `/v1` endpoint.
 
 ## Izvorna koda agenta
 

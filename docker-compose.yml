@@ -1,4 +1,11 @@
 services:
+  bifrost:
+    image: maximhq/bifrost
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+
   agent:
     build:
       context: .
@@ -7,6 +14,9 @@ services:
       - .env
     environment:
       - AGENT_DATA_ROOT=/data
+      - BIFROST_BASE_URL=http://bifrost:8080/v1
+    depends_on:
+      - bifrost
     volumes:
       - ./data:/data
     # Optional CLI adapter - one-shot runs. The persistent agent-api service
@@ -23,6 +33,9 @@ services:
       - .env
     environment:
       - AGENT_DATA_ROOT=/data
+      - BIFROST_BASE_URL=http://bifrost:8080/v1
+    depends_on:
+      - bifrost
     volumes:
       - ./data:/data
     ports:

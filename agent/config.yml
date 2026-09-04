@@ -16,22 +16,22 @@ orchestrator_agent:
   name: ORCHESTRATOR
   model: gpt-5.6-luna
   temperature: 1.0
-  base_url: https://api.openai.com/v1
-  api_key: OPENAI_API_KEY
+  base_url: http://localhost:8080/v1
+  api_key: BIFROST_API_KEY
 
 memory_agent:
   name: MEMORY
   model: gpt-5.6-luna
   temperature: 1.0
-  base_url: https://api.openai.com/v1
-  api_key: OPENAI_API_KEY
+  base_url: http://localhost:8080/v1
+  api_key: BIFROST_API_KEY
 
 response_agent:
   name: RESPONSE
   model: gpt-5.6-luna
   temperature: 1.0
-  base_url: https://api.openai.com/v1
-  api_key: OPENAI_API_KEY
+  base_url: http://localhost:8080/v1
+  api_key: BIFROST_API_KEY
 
 response_schema_path: resources/response_schema.json
 
@@ -40,11 +40,11 @@ agents:
     name: PROGRAMMER
     model: gpt-5.6-luna
     temperature: 1.0
-    base_url: https://api.openai.com/v1
-    api_key: OPENAI_API_KEY
+    base_url: http://localhost:8080/v1
+    api_key: BIFROST_API_KEY
   agent_002:
     name: PLANNER
     model: gpt-5.6-luna
     temperature: 1.0
-    base_url: https://api.openai.com/v1
-    api_key: OPENAI_API_KEY
+    base_url: http://localhost:8080/v1
+    api_key: BIFROST_API_KEY
