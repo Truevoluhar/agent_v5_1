@@ -1,7 +1,7 @@
 import json
 from typing import Any, Callable, Union
 
-from openai import OpenAI
+from openai import OpenAI, DefaultHttpx2Client
 
 from agent.context_guard import ContextLimits, ContextWindowGuard
 from agent.tools.tools_registry import get_tool_schemas, execute_registered_tool
@@ -106,7 +106,7 @@ class GenericAgent:
         if self.base_url:
             client_kwargs["base_url"] = self.base_url
 
-        client = OpenAI(**client_kwargs)
+        client = OpenAI(**client_kwargs, http_client=DefaultHttpx2Client(verify=False))
         return client
 
 

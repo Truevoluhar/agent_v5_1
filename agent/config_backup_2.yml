@@ -14,23 +14,23 @@ context_limits:
 
 orchestrator_agent:
   name: ORCHESTRATOR
-  model: redhataiqwen36-35b-a3b
+  model: gpt-5.6-luna
   temperature: 1.0
-  base_url: https://redhataiqwen36-35b-a3b-test-project-1.apps.foswxai01.zpiz.si/v1
+  base_url: https://api.openai.com/v1
   api_key: OPENAI_API_KEY
 
 memory_agent:
   name: MEMORY
-  model: redhataiqwen36-35b-a3b
+  model: gpt-5.6-luna
   temperature: 1.0
-  base_url: https://redhataiqwen36-35b-a3b-test-project-1.apps.foswxai01.zpiz.si/v1
+  base_url: https://api.openai.com/v1
   api_key: OPENAI_API_KEY
 
 response_agent:
   name: RESPONSE
-  model: redhataiqwen36-35b-a3b
+  model: gpt-5.6-luna
   temperature: 1.0
-  base_url: https://redhataiqwen36-35b-a3b-test-project-1.apps.foswxai01.zpiz.si/v1
+  base_url: https://api.openai.com/v1
   api_key: OPENAI_API_KEY
 
 response_schema_path: resources/response_schema.json
@@ -38,19 +38,19 @@ response_schema_path: resources/response_schema.json
 agents:
   agent_001:
     name: PROGRAMMER
-    model: redhataiqwen36-35b-a3b
+    model: gpt-5.6-luna
     temperature: 1.0
-    base_url: https://redhataiqwen36-35b-a3b-test-project-1.apps.foswxai01.zpiz.si/v1
+    base_url: https://api.openai.com/v1
     api_key: OPENAI_API_KEY
   agent_002:
     name: PLANNER
-    model: redhataiqwen36-35b-a3b
+    model: gpt-5.6-luna
     temperature: 1.0
-    base_url: https://redhataiqwen36-35b-a3b-test-project-1.apps.foswxai01.zpiz.si/v1
+    base_url: https://api.openai.com/v1
     api_key: OPENAI_API_KEY
   agent_003:
     name: BAW_AGENT
-    model: redhataiqwen36-35b-a3b
+    model: gpt-5.6-luna
     temperature: 1.0
-    base_url: https://redhataiqwen36-35b-a3b-test-project-1.apps.foswxai01.zpiz.si/v1
+    base_url: https://api.openai.com/v1
     api_key: OPENAI_API_KEY

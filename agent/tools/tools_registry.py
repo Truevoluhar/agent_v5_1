@@ -6,7 +6,8 @@ from agent.tools.shell import RUN_SHELL_TOOL
 from agent.tools.plan import READ_PLAN_TOOL, CREATE_OR_UPDATE_PLAN_TOOL
 from agent.tools.drawio import READ_DRAWIO_REFERENCE_TOOL, UPSERT_DRAWIO_DIAGRAM_TOOL
 from agent.tools.git_repo import GIT_REPO_BROWSER_TOOL
-
+from agent.tools.najdiAsset import NAJDI_ASSET_TOOL
+from agent.tools.getAssetWhereUsed import GET_ASSET_WHERE_USED_TOOL
 
 TOOLS = {
     tool.name: tool for tool in [
@@ -16,6 +17,8 @@ TOOLS = {
         READ_DRAWIO_REFERENCE_TOOL,
         UPSERT_DRAWIO_DIAGRAM_TOOL,
         GIT_REPO_BROWSER_TOOL,
+        NAJDI_ASSET_TOOL,
+        GET_ASSET_WHERE_USED_TOOL
     ]
 }
 

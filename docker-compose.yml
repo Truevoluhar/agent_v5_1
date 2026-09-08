@@ -7,8 +7,13 @@ services:
       - .env
     environment:
       - AGENT_DATA_ROOT=/data
+
+      - CLIENT_CERT=/app/client_certs/client.crt
+      - CLIENT_KEY=/app/client_certs/client.key
     volumes:
       - ./data:/data
+      - /home/Z66176/Public/key:/app/client_certs:ro,z
+      - /etc/pki/ca-trust/source/anchors:/app/certs:rw,z
     # Optional CLI adapter - one-shot runs. The persistent agent-api service
     # below is the recommended way to drive the agent loop (see
     # "Agent GUI Integration.pdf").
@@ -23,8 +28,12 @@ services:
       - .env
     environment:
       - AGENT_DATA_ROOT=/data
+      - CLIENT_CERT=/app/client_certs/client.crt
+      - CLIENT_KEY=/app/client_certs/client.key
     volumes:
       - ./data:/data
+      - /home/Z66176/Public/key:/app/client_certs:ro,z
+      - /etc/pki/ca-trust/source/anchors:/app/certs:rw,z
     ports:
       - "8100:8100"
 
