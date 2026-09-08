@@ -130,7 +130,17 @@ class ContextWindowGuard:
             message for message in ordered_messages
             if message.get("role") != "system"
         ]
-        return [*system_messages, *non_system_messages]
+        if not system_messages:
+            return non_system_messages
+
+        merged_system_message = {
+            "role": "system",
+            "content": "\n\n".join(
+                message.get("content", "")
+                for message in system_messages
+            ),
+        }
+        return [merged_system_message, *non_system_messages]
 
     def trim_response_input_items(
         self,

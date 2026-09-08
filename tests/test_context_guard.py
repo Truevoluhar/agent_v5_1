@@ -19,12 +19,9 @@ class ContextGuardTests(unittest.TestCase):
 
         self.assertEqual(
             [message["role"] for message in trimmed],
-            ["system", "system", "user", "assistant"],
+            ["system", "user", "assistant"],
         )
-        self.assertEqual(
-            [message["content"] for message in trimmed[:2]],
-            ["agent instructions", "active plan"],
-        )
+        self.assertEqual(trimmed[0]["content"], "agent instructions\n\nactive plan")
 
     def test_trim_function_call_outputs_keeps_all_call_ids(self):
         limits = ContextLimits(
