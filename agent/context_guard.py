@@ -121,7 +121,16 @@ class ContextWindowGuard:
 
             break
 
-        return list(reversed(selected_reversed))
+        ordered_messages = list(reversed(selected_reversed))
+        system_messages = [
+            message for message in ordered_messages
+            if message.get("role") == "system"
+        ]
+        non_system_messages = [
+            message for message in ordered_messages
+            if message.get("role") != "system"
+        ]
+        return [*system_messages, *non_system_messages]
 
     def trim_response_input_items(
         self,

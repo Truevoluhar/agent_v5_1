@@ -5,6 +5,27 @@ from agent.context_guard import ContextLimits, ContextWindowGuard
 
 class ContextGuardTests(unittest.TestCase):
 
+    def test_trim_messages_places_all_system_messages_first(self):
+        guard = ContextWindowGuard(ContextLimits(max_input_chars=10_000))
+
+        trimmed = guard.trim_messages(
+            [
+                {"role": "system", "content": "agent instructions"},
+                {"role": "user", "content": "request"},
+                {"role": "system", "content": "active plan"},
+                {"role": "assistant", "content": "tool result"},
+            ]
+        )
+
+        self.assertEqual(
+            [message["role"] for message in trimmed],
+            ["system", "system", "user", "assistant"],
+        )
+        self.assertEqual(
+            [message["content"] for message in trimmed[:2]],
+            ["agent instructions", "active plan"],
+        )
+
     def test_trim_function_call_outputs_keeps_all_call_ids(self):
         limits = ContextLimits(
             max_input_chars=120,
