@@ -246,6 +246,7 @@ class GenericAgent:
                     input=bounded_input_items,
                     tools=tools,
                     tool_choice="auto",
+                    store=False,
                     reasoning={
                         "effort": "medium",
                     },
@@ -260,6 +261,8 @@ class GenericAgent:
             raise RuntimeError(
                 "Failed to create initial model response after context trimming retries."
             ) from last_error
+
+        response_input_items: list[Any] = list(bounded_input_items)
 
         for _ in range(100):
             tool_calls = [
@@ -334,39 +337,45 @@ class GenericAgent:
                     }
                 )
 
-            # previous_response_id preserves the model output, including the
-            # reasoning and function-call items, for the next tool-loop step.
             last_error = None
             next_response = None
+            successful_next_input: list[Any] | None = None
             for attempt in range(1, self.context_limits.max_retries + 1):
                 bounded_tool_outputs = self.context_guard.trim_function_call_outputs(
                     tool_outputs,
                     attempt=attempt,
                 )
+                next_input: list[Any] = [
+                    *response_input_items,
+                    *response.output,
+                    *bounded_tool_outputs,
+                ]
 
                 try:
                     next_response = self.client.responses.create(
                         model=self.model,
                         instructions=self.system_message,
-                        previous_response_id=response.id,
-                        input=bounded_tool_outputs,
+                        input=next_input,
                         tools=tools,
                         tool_choice="auto",
+                        store=False,
                         reasoning={
                             "effort": "medium",
                         },
                     )
+                    successful_next_input = next_input
                     break
                 except Exception as exc:
                     last_error = exc
                     if not self.context_guard.is_context_length_error(exc):
                         raise
 
-            if next_response is None:
+            if next_response is None or successful_next_input is None:
                 raise RuntimeError(
                     "Failed to continue model response after context trimming retries."
                 ) from last_error
 
+            response_input_items = successful_next_input
             response = next_response
 
         raise RuntimeError("Maximum tool-call iterations reached.")

@@ -1,0 +1,304 @@
+agent_v5_1
+Stateless Responses API Continuation Fix Plan
+Target: vLLM Responses API with server-side response storage disabled
+Repository reviewed: github.com/Truevoluhar/agent_v5_1 (main branch)
+Review date: 8 September 2026
+
+Contents
+1. Root cause and scope
+2. File-by-file decision
+3. Mandatory code change in GenericAgent
+4. Recommended context-budget hardening
+5. Tests to add
+6. Deployment and verification procedure
+7. Rollback and failure diagnostics
+8. Source references
+
+1. Root cause and scope
+The current GenericAgent tool loop starts a Responses API request, executes a local tool, then asks vLLM to continue by passing previous_response_id=response.id. With vLLM response storage disabled, the first request can return a resp_* ID even though that ID is not retained for later lookup. The second request therefore fails with HTTP 404.
+Current failing sequence:
+
+POST /v1/responses  -> response.id = resp_...
+execute local tool  -> function_call_output
+POST /v1/responses  -> previous_response_id=resp_...
+                         ^ vLLM cannot find stored response -> 404
+The production-safe approach is to keep the tool-loop state in the agent process and send a self-contained input list on every continuation. This avoids vLLM response storage entirely, works across vLLM restarts/replicas, and avoids the documented unbounded in-memory Responses store.
+Important distinction: this change concerns Responses API continuation state. It is separate from the TLS verify=False change already made for your internal endpoint.
+2. File-by-file decision
+
+Repository evidence: GenericAgent is the only reviewed file containing previous_response_id. Runner has a one-shot responses.create call for the session title, while OrchestratorAgent and ResponseAgent use Chat Completions.
+3. Mandatory code change in GenericAgent
+3.1 Goal
+Modify only the active Responses-based GenericAgent.chat() implementation. Preserve the complete in-flight Responses item sequence locally and send that sequence as input on each tool-loop continuation.
+Desired request sequence:
+
+initial_input = [user/assistant messages]
+response_1 = responses.create(input=initial_input, store=False)
+
+next_input = [
+    *initial_input,
+    *response_1.output,            # reasoning + function_call items
+    *function_call_outputs,
+]
+response_2 = responses.create(input=next_input, store=False)
+
+# If response_2 calls another tool:
+next_input_2 = [
+    *next_input,
+    *response_2.output,
+    *function_call_outputs_2,
+]
+response_3 = responses.create(input=next_input_2, store=False)
+3.2 Exact edit points
+Open agent/generic_agent.py and edit the active chat() method beginning around source line 196 on current main.
+Leave the initial input_items conversion and the first responses.create call in place, but add store=False to make the stateless intent explicit.
+After the initial response is successfully created, initialize a local response_input_items list from the exact bounded_input_items used by the successful request.
+In the tool continuation block around current source lines 310-340, remove previous_response_id=response.id.
+Build next_input from the prior local response_input_items, the complete response.output, and the bounded function_call_output items.
+Only update response_input_items after the continuation request succeeds. This prevents duplicate history when a retry occurs.
+Then assign response = next_response and continue the existing loop unchanged.
+Recommended exact patch shape
+# After the initial responses.create(...) succeeds:
+response_input_items: list[Any] = list(bounded_input_items)
+
+for _ in range(100):
+    tool_calls = [
+        item for item in response.output
+        if item.type == "function_call"
+    ]
+
+    ... existing tool execution code ...
+
+    last_error = None
+    next_response = None
+    successful_next_input: list[Any] | None = None
+
+    for attempt in range(1, self.context_limits.max_retries + 1):
+        bounded_tool_outputs = self.context_guard.trim_function_call_outputs(
+            tool_outputs,
+            attempt=attempt,
+        )
+
+        next_input: list[Any] = [
+            *response_input_items,
+            *response.output,
+            *bounded_tool_outputs,
+        ]
+
+        try:
+            next_response = self.client.responses.create(
+                model=self.model,
+                instructions=self.system_message,
+                input=next_input,
+                tools=tools,
+                tool_choice="auto",
+                store=False,
+                reasoning={
+                    "effort": "medium",
+                },
+            )
+            successful_next_input = next_input
+            break
+        except Exception as exc:
+            last_error = exc
+            if not self.context_guard.is_context_length_error(exc):
+                raise
+
+    if next_response is None or successful_next_input is None:
+        raise RuntimeError(
+            "Failed to continue model response after context trimming retries."
+        ) from last_error
+
+    response_input_items = successful_next_input
+    response = next_response
+Also add store=False to the initial call in the same method:
+response = self.client.responses.create(
+    model=self.model,
+    instructions=self.system_message,
+    input=bounded_input_items,
+    tools=tools,
+    tool_choice="auto",
+    store=False,
+    reasoning={"effort": "medium"},
+)
+3.3 Why response.output must be carried forward
+Do not carry forward only the function_call item. The model response may contain reasoning items and multiple function calls. When context is managed manually, the prior response items belong in the next Responses input. Keeping response.output intact preserves the model-generated call IDs and any reasoning metadata needed by the next turn.
+Keep each function_call and its matching function_call_output together.
+Keep all calls from a multi-tool response, not only the first call.
+Do not rewrite call_id values.
+Do not append the same response.output twice during a retry.
+Do not do this: convert the GenericAgent continuation back to previous_response_id, enable vLLM store, or persist resp_* IDs in Session. Those approaches restore dependency on server-side state.
+4. Recommended context-budget hardening
+The mandatory patch removes the 404, but it changes request size: every continuation now includes prior Responses items. Your configured max_input_chars is relatively small, and tool outputs can be large, so a long tool loop can exceed the context budget even though each individual tool output is truncated.
+4.1 Why the current guard is insufficient for stateless continuation
+agent/context_guard.py currently has two relevant methods:
+trim_response_input_items(): sanitizes to user/assistant messages only. It deliberately discards non-message Responses items, so it must NOT be run over an in-flight stateless tool history containing reasoning/function_call/function_call_output items.
+trim_function_call_outputs(): limits only the new tool output payloads and does not subtract the size of prior local Responses history.
+Therefore, the first production hardening should be a Responses-aware history budget rather than reusing trim_response_input_items on the flattened tool loop.
+4.2 Recommended implementation design
+Use whole-turn segments instead of treating the Responses history as ordinary chat messages. This prevents the context guard from splitting a function_call from its matching function_call_output.
+# Conceptual structure inside GenericAgent.chat()
+base_items = bounded_input_items
+completed_tool_turns: list[list[Any]] = []
+
+# After a model response requests tools:
+current_turn = [
+    *response.output,
+    *bounded_tool_outputs,
+]
+
+# Next request is self-contained:
+next_input = [
+    *base_items,
+    *flatten(completed_tool_turns),
+    *current_turn,
+]
+
+# Commit a turn only after the next request succeeds:
+completed_tool_turns.append(current_turn)
+Add a new helper in agent/context_guard.py rather than changing trim_response_input_items semantics. Suggested name: trim_response_tool_history or budget_response_history.
+
+4.3 Practical staged approach
+Deploy the mandatory GenericAgent patch first and verify the 404 disappears.
+Add tests that assert the second request is self-contained and has no previous_response_id.
+Add Responses-aware context budgeting before allowing very long or high-volume tool loops in production.
+Keep max tool iterations at the existing limit initially; consider lowering 100 later if it is not operationally necessary.
+4.4 Optional defensive edit in Runner
+Runner._generate_session_name() is one-shot and does not need history changes. You may add store=False to its responses.create call solely to document that the title generation should never use server-side response storage. This is optional and does not fix the 404.
+response = client.responses.create(
+    model=agent_config["model"],
+    instructions=instructions,
+    input=...,
+    temperature=...,
+    store=False,
+)
+5. Tests to add
+5.1 New GenericAgent regression test - mandatory
+Add tests/test_generic_agent_responses.py. Mock the OpenAI client so the first response contains a reasoning item plus a function_call, and the second response contains final text.
+Assert call #1 uses store=False.
+Assert call #2 does not contain previous_response_id at all.
+Assert call #2 input begins with the initial user/assistant input.
+Assert call #2 input contains every item from response_1.output, including reasoning/function_call.
+Assert call #2 input contains a function_call_output with the exact matching call_id.
+Assert a successful final answer is returned and persisted as the final assistant session message.
+Core assertion shape:
+
+second_kwargs = mocked_create.call_args_list[1].kwargs
+assert "previous_response_id" not in second_kwargs
+assert second_kwargs["store"] is False
+
+second_input = second_kwargs["input"]
+assert initial_user_item in second_input
+assert first_response.output[0] in second_input   # e.g. reasoning
+assert first_response.output[1] in second_input   # function_call
+assert any(
+    item.get("type") == "function_call_output"
+    and item.get("call_id") == first_tool_call.call_id
+    for item in second_input
+    if isinstance(item, dict)
+)
+5.2 Multi-round tool test - strongly recommended
+Mock three model responses: tool call A, tool call B, final text. Verify request #3 contains the complete committed history for both prior tool rounds exactly once. This catches accidental duplication when retries are added.
+Expected request #3 ordering:
+
+initial user/assistant items
+response_1.output
+function_call_output(A)
+response_2.output
+function_call_output(B)
+5.3 Context guard tests - recommended
+Extend tests/test_context_guard.py when the Responses-aware budget helper is introduced. The existing test already verifies that trim_function_call_outputs retains all call IDs. Add tests that ensure structural pairs remain intact.
+Retains current function_call + function_call_output pair under tight budget.
+Drops an older completed turn as a whole rather than orphaning one side of a pair.
+Preserves reasoning items for retained turns.
+Truncates tool output strings without changing call IDs.
+On higher retry attempts, history is no larger than on attempt 1.
+5.4 Existing components that need regression-only checks
+OrchestratorAgent: existing Chat Completions tool flow still works; no Responses-state migration.
+ResponseAgent: structured final response parsing still works.
+Runner: new session title still works and remains one-shot.
+6. Deployment and verification procedure
+6.1 Build/deploy
+Because the repository Dockerfiles copy source code into the image, rebuild/recreate the agent-api image after code changes rather than only restarting the existing container.
+docker compose build agent-api
+docker compose up -d --force-recreate agent-api
+docker compose logs -f agent-api
+For OpenShift/Kubernetes, rebuild the application image and roll the agent service deployment in the equivalent manner. The vLLM deployment does not need VLLM_ENABLE_RESPONSES_API_STORE enabled.
+6.2 Runtime verification
+Run a request that reliably delegates to PROGRAMMER and triggers najdiAsset (the flow that previously failed).
+Confirm the first tool starts and completes normally.
+Confirm the next LLM call succeeds instead of returning “Response with id ... not found”.
+Confirm a second tool call, if requested, also succeeds. One tool round is not sufficient to prove history accumulation is correct.
+Confirm the final response is produced and the run status is completed.
+Confirm vLLM still runs with response storage disabled.
+Expected event sequence
+Orchestrator: delegate_to_agent
+Delegated to PROGRAMMER
+Running tool: najdiAsset (PROGRAMMER)
+Tool completed: najdiAsset
+[GenericAgent continuation succeeds]
+... optional additional tool calls ...
+Agent message completed
+Run completed
+6.3 Multi-replica verification
+If the model endpoint is served by more than one vLLM replica, repeat the tool test with normal load balancing. Stateless continuation should remain correct even if successive /v1/responses requests reach different replicas, because every continuation request carries its own required history.
+6.4 Logging recommended during rollout
+Log the number of input items per Responses request, not their full contents.
+Log approximate serialized character count of the stateless input.
+Log tool-loop iteration number and count of current tool calls.
+Do not log API keys or complete sensitive tool payloads.
+If a context-length retry happens, log which reduction strategy was applied.
+7. Rollback and failure diagnostics
+7.1 Safe rollback
+If the stateless patch causes a new incompatibility with your specific vLLM build, revert only the GenericAgent continuation patch while investigating. Do not use enabling the unbounded vLLM response store as the default permanent rollback strategy.
+7.2 Likely post-fix errors and meaning
+
+7.3 Deployment image check
+Verify the running container actually contains the patched source:
+docker compose exec agent-api sh -lc \
+  'grep -n "previous_response_id\|successful_next_input\|store=False" /app/agent/generic_agent.py'
+The active GenericAgent continuation should have no previous_response_id. If grep still shows it in the active method, the image was not rebuilt or the wrong service/image is running.
+8. Source references
+Repository line references are based on the main branch as reviewed on 8 September 2026; source line numbers can move after later commits.
+GenericAgent active Responses tool loop: https://raw.githubusercontent.com/Truevoluhar/agent_v5_1/refs/heads/main/agent/generic_agent.py
+Current source: active chat() begins around line 196; previous_response_id continuation appears around lines 310-324.
+ContextWindowGuard: https://raw.githubusercontent.com/Truevoluhar/agent_v5_1/refs/heads/main/agent/context_guard.py
+trim_response_input_items is message-only; trim_function_call_outputs preserves all call outputs while truncating payloads.
+OrchestratorAgent: https://raw.githubusercontent.com/Truevoluhar/agent_v5_1/refs/heads/main/agent/orchestrator_agent.py
+Uses Chat Completions and explicit request_messages; no previous_response_id.
+ResponseAgent: https://raw.githubusercontent.com/Truevoluhar/agent_v5_1/refs/heads/main/agent/response_agent.py
+Uses Chat Completions structured parsing; no previous_response_id.
+Runner: https://raw.githubusercontent.com/Truevoluhar/agent_v5_1/refs/heads/main/agent/runner.py
+Session name uses one-shot responses.create; no response continuation.
+vLLM environment variable documentation: https://docs.vllm.ai/en/stable/configuration/env_vars/
+Documents VLLM_ENABLE_RESPONSES_API_STORE and warns stored messages are in memory and never removed until termination.
+vLLM Responses renderer documentation: https://docs.vllm.ai/en/latest/serving/online_serving/renderer/
+Describes self-contained/stateless Responses rendering and inline history.
+OpenAI Responses API reference: https://platform.openai.com/docs/api-reference/responses
+Responses input supports prior assistant/tool items; reasoning items should be included when manually managing context.
+
+Decision summary | For the current 404 “Response with id ... not found” failure, the mandatory runtime behavior change is in agent/generic_agent.py only. It is the only reviewed runtime file that uses previous_response_id. Do not convert OrchestratorAgent, ResponseAgent, or the session-name code in Runner to this continuation mechanism. For a production-quality stateless implementation, also harden agent/context_guard.py and add tests.
+
+File | Current LLM API/state behavior | Action for this 404 fix
+agent/generic_agent.py | Uses Responses API for the active tool loop. Continuation currently passes previous_response_id=response.id (current main, around source lines 310-324). | MANDATORY: remove previous_response_id and carry response.output + matching function_call_output items forward in input.
+agent/context_guard.py | trim_response_input_items keeps only user/assistant messages; trim_function_call_outputs only budgets the newest tool outputs. | RECOMMENDED: add Responses-history-aware budgeting for longer stateless tool loops. Not necessary to prove/fix the 404 itself.
+agent/orchestrator_agent.py | Uses Chat Completions; tool loop appends assistant/tool messages to request_messages. No previous_response_id. | NO CHANGE for this issue. Keep its explicit Chat Completions history.
+agent/response_agent.py | Uses Chat Completions structured parsing. No previous_response_id. | NO CHANGE for this issue.
+agent/runner.py | Uses Responses API only for one-shot session-name generation; no continuation ID is reused. | NO functional change for this issue. Optional: set store=False explicitly for defensive clarity.
+agent/config.yml / vLLM deployment | vLLM response store can remain disabled. | Do NOT enable VLLM_ENABLE_RESPONSES_API_STORE as the solution. Keep it disabled.
+tests/ | Only ContextWindowGuard tests currently cover function_call_output retention; no GenericAgent Responses continuation regression test. | ADD tests for stateless tool continuation and context-history preservation.
+
+Rule | Required behavior
+Atomic tool turns | Never keep a function_call_output while dropping its matching function_call. Drop old completed turns as a unit.
+Current turn | Always retain the newest response.output and all matching function_call_output items. If necessary, truncate output payload text rather than dropping items.
+Base conversation | Trim older user/assistant messages first using the existing response-message guard.
+Reasoning items | Preserve reasoning items that belong to retained model turns; do not run them through message-only sanitization.
+Retry behavior | Attempt 1 uses the fullest allowed history; later context-length retries reduce old base messages and/or oldest completed tool turns, never duplicate current items.
+Character estimate | Use serialized/text length as an approximate budget, consistent with the existing guard. Token-level accounting can be added later if required.
+
+Error after patch | Likely cause / next action
+400: no tool output found for function call | A function_call was not carried forward with its matching function_call_output, or call_id changed. Inspect next_input ordering and IDs.
+400: invalid input item / schema | Your vLLM version may reject a field on a replayed response output item. Capture the exact outgoing JSON and normalize output items only as needed, preserving type/call_id/arguments/reasoning.
+context_length_exceeded | Stateless history is correct but too large. Implement the Responses-aware history budget described in Section 4.
+404 response id not found | Some remaining code path still sends previous_response_id. Search the deployed image, not only the host source tree.
+Tool executes twice | History was committed before a failed retry or appended twice. Commit successful_next_input only after the model request succeeds.
