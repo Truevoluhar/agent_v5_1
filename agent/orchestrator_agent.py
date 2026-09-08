@@ -5,7 +5,7 @@ from typing import Any, Type, Literal, Optional, Union, TypeVar
 from dataclasses import dataclass, asdict, is_dataclass
 
 import uuid
-from openai import OpenAI
+from openai import OpenAI, DefaultHttpx2Client
 from pydantic import BaseModel, Field, create_model, model_validator, ConfigDict
 
 from agent.context_guard import ContextLimits, ContextWindowGuard
@@ -162,7 +162,7 @@ class OrchestratorAgent:
         if self.base_url:
             client_kwargs["base_url"] = self.base_url
 
-        client = OpenAI(**client_kwargs)
+        client = OpenAI(**client_kwargs, http_client=DefaultHttpx2Client(verify=False))
         return client
     
 
