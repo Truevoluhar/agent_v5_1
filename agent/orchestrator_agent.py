@@ -31,6 +31,20 @@ class OrchestratorResponseBase(BaseModel):
         description="Short description of the task or result."
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_non_delegation_agent(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        action = value.get("action")
+        if action != "delegate_to_agent" and value.get("agent_name") is not None:
+            normalized = dict(value)
+            normalized["agent_name"] = None
+            return normalized
+
+        return value
+
     @model_validator(mode="after")
     def validate_agent_selection(self) -> Self:
         agent_name = getattr(self, "agent_name", None)
@@ -39,7 +53,7 @@ class OrchestratorResponseBase(BaseModel):
             if agent_name is None:
                 raise ValueError("agent_name is required when delegating task to agent")
         elif agent_name is not None:
-            raise ValueError("agent_name must me null unless delegating task to agent")
+            raise ValueError("agent_name must be null unless delegating task to agent")
 
         return self
 
@@ -175,6 +189,8 @@ class OrchestratorAgent:
 
         sys_msg += "\n\n IMPORTANT ORCHESTRATION RULES \n"
         sys_msg += "- If the task has been completed and no further delegation or user input is required, return action='finish'.\n"
+        sys_msg += "- For action='finish' or action='ask_user', always return agent_name=null.\n"
+        sys_msg += "- Only include an agent_name when action='delegate_to_agent'.\n"
         sys_msg += "- A response agent will create the final structured response after you finish.\n"
         sys_msg += "- Prefer 'finish' over endless delegation once the work requested by the user is complete.\n"
         sys_msg += "\n\n AVAILABLE AGENTS \n"
