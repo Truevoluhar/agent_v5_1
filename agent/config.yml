@@ -3,6 +3,8 @@ workspace: agent_workspace
 session: ./session
 memory: ./memory
 max_steps: 100
+# A worker yields to the orchestrator after each batch; durable work survives.
+max_worker_iterations: 100
 
 context_limits:
   max_system_message_chars: 10000

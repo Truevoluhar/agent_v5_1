@@ -243,13 +243,9 @@ class OrchestratorAgent:
     ) -> BaseModel:
 
         
-        def message_to_str(m):
-            return json.dumps(m)
-        
-        request_messages = [
-            { "role": "system", "content": self.system_message },
-            { "role": "user", "content": message_to_str(messages) }
-        ]
+        # Keep messages separate so trimming preserves the newest objective and
+        # queue checkpoint instead of truncating the tail of one large JSON blob.
+        request_messages = messages
 
         completion = None
         last_error: Exception | None = None
@@ -258,6 +254,7 @@ class OrchestratorAgent:
                 request_messages,
                 attempt=attempt,
             )
+            bounded_messages.insert(0, {"role": "system", "content": self.system_message})
             try:
                 completion = self.client.beta.chat.completions.parse(
                     model=self.model,

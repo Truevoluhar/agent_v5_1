@@ -6,6 +6,7 @@ service/api.py (persisted events, queued input, cancellable).
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,8 @@ import traceback
 import yaml
 from openai import OpenAI, DefaultHttpx2Client
 
+from agent.execution import RunCancelled, BudgetExhausted, EXECUTION_POLICY, workspace_lock
+from agent.work_queue import WorkQueue
 from agent.context_guard import ContextLimits, ContextWindowGuard
 from agent.events import EventEmitter, EventSink
 from agent.generic_agent import GenericAgent
@@ -32,10 +35,6 @@ MAX_PLAN_CONTEXT_CHARS = 12_000
 
 WaitForInput = Callable[[str], str]
 IsCancelled = Callable[[], bool]
-
-
-class RunCancelled(Exception):
-    """Raised internally when a caller requests cancellation mid-run."""
 
 
 @dataclass
@@ -92,7 +91,13 @@ class AgentRunner:
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
 
-    def run(
+    def run(self, request, emit, wait_for_input, is_cancelled=None):
+        workspace_value = request.workspace or self.config["workspace"]
+        workspace = DATA_ROOT / workspace_value if workspace_value else DATA_ROOT
+        with workspace_lock(workspace):
+            return self._run(request, emit, wait_for_input, is_cancelled)
+
+    def _run(
         self,
         request: RunRequest,
         emit: EventSink,
@@ -224,6 +229,9 @@ class AgentRunner:
                 wait_for_input=wait_for_input,
                 is_cancelled=is_cancelled,
             )
+        except BudgetExhausted as exc:
+            emitter.emit("run.failed", {"error": str(exc), "resumable": True})
+            return RunResult(run_id=run_id, session_id=session.id, status="failed", error=str(exc))
         except RunCancelled:
             emitter.emit("run.cancelled", {})
             return RunResult(run_id=run_id, session_id=session.id, status="cancelled")
@@ -391,6 +399,9 @@ class AgentRunner:
         wait_for_input: WaitForInput,
         is_cancelled: IsCancelled,
     ):
+        queue = WorkQueue(agent_workspace, session.id)
+        objective = next((m.get("content", "") for m in reversed(session.messages) if m.get("role") == "user"), "")
+        objective = queue.objective(str(objective))
         for step in range(config["max_steps"]):
             if is_cancelled():
                 raise RunCancelled()
@@ -451,6 +462,9 @@ class AgentRunner:
             if historical_context:
                 orchestrator_messages.insert(0, {"role": "system", "content": historical_context})
 
+            durable_context = (EXECUTION_POLICY + "\nCurrent objective: " + str(objective)
+                               + "\nDurable work status: " + json.dumps(queue.summary()))
+            orchestrator_messages.append({"role": "user", "content": durable_context})
             emitter.emit("orchestrator.started", {"step": step})
             orchestrator_response = orchestrator_agent.chat_structured(messages=orchestrator_messages)
             emitter.emit(
@@ -492,25 +506,44 @@ class AgentRunner:
                                 "role": "system",
                                 "content": (
                                     "Execution must follow active PLAN.md. "
-                                    "If work changes scope, update PLAN.md first, then continue."
+                                    "If work changes scope, update PLAN.md first, then continue.\n" + plan_text
                                 ),
                             },
                         )
 
-                    delegated_agent.chat(
-                        agent_messages,
-                        session,
-                        emit=lambda event_type, data: emitter.emit(event_type, data),
-                    )
+                    agent_messages.append({"role": "user", "content": durable_context + "\nDelegated task: " + orchestrator_response.description})
+                    try:
+                        delegated_agent.chat(
+                            agent_messages,
+                            session,
+                            emit=lambda event_type, data: emitter.emit(event_type, data),
+                            is_cancelled=is_cancelled,
+                            max_iterations=int(config.get("max_worker_iterations", 100)),
+                        )
+                    except BudgetExhausted:
+                        emitter.emit("agent.yielded", {"agent": delegated_agent.name, "reason": "iteration_budget"})
+                        session.add_message({"role": "assistant", "content":
+                            "Worker batch ended. Resume from work_queue and archived tool results; work is not yet complete."})
+
 
             if orchestrator_response.action == "ask_user":
                 emitter.emit("input.required", {"question": orchestrator_response.description})
                 user_response = wait_for_input(orchestrator_response.description)
+                if is_cancelled():
+                    raise RunCancelled()
                 session.add_message({"role": "user", "content": user_response})
+                objective += "\nUser clarification: " + user_response
 
-            should_finalize = orchestrator_response.action == "finish" or (
-                step == config["max_steps"] - 1 and orchestrator_response.action != "ask_user"
-            )
+            if is_cancelled():
+                raise RunCancelled()
+            should_finalize = orchestrator_response.action == "finish"
+            if should_finalize:
+                coverage = queue.verify()
+                emitter.emit("work.coverage", coverage)
+                if coverage["remaining"]:
+                    session.add_message({"role": "user", "content":
+                        "Completion rejected: durable queue has unfinished or invalidated tasks. Resume work_queue next; resolve failures before finishing."})
+                    continue
 
             if should_finalize:
                 if response_agent is not None:
@@ -530,7 +563,9 @@ class AgentRunner:
                         schema_source=response_schema_source,
                         session=session,
                     )
+                    if is_cancelled():
+                        raise RunCancelled()
                     return final_response
                 return None
 
-        return None
+        raise BudgetExhausted("Run step budget reached; resume this session to continue durable work.")

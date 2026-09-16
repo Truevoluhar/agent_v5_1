@@ -5,6 +5,12 @@ from agent.context_guard import ContextLimits, ContextWindowGuard
 
 class ContextGuardTests(unittest.TestCase):
 
+    def test_partial_configuration_uses_concrete_defaults(self):
+        limits = ContextLimits.from_dict({"max_input_chars": 4000})
+        self.assertEqual(limits.max_input_chars, 4000)
+        self.assertEqual(limits.max_message_chars, ContextLimits().max_message_chars)
+
+
     def test_trim_messages_places_all_system_messages_first(self):
         guard = ContextWindowGuard(ContextLimits(max_input_chars=10_000))
 

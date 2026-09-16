@@ -174,5 +174,39 @@ class GenericAgentResponsesTests(unittest.TestCase):
         self.assertNotIn("previous_response_id", client.calls[2])
 
 
+class LongRunTests(unittest.TestCase):
+    make_agent = GenericAgentResponsesTests.make_agent
+
+    def test_compaction_archives_history_without_orphan_calls(self):
+        client = FakeResponsesClient([])
+        agent = self.make_agent(client)
+        with tempfile.TemporaryDirectory() as workspace:
+            agent.workspace_path = workspace
+            agent.context_limits.max_input_chars = 2400
+            items = [{'role': 'user', 'content': 'Document every file'},
+                     {'type': 'function_call', 'call_id': 'a', 'name': 'run_shell', 'arguments': '{}'},
+                     {'type': 'function_call_output', 'call_id': 'a', 'output': 'x' * 5000}]
+            result = agent._compact_continuation(items, items[:1], 'session', 1, None)
+            self.assertLess(len(json.dumps(result)), 2400)
+            self.assertTrue(all(item.get('type') is None for item in result))
+            archives = list((Path(workspace) / '.agent/tool-results').glob('context-*.json'))
+            self.assertEqual(json.loads(archives[0].read_text()), items)
+
+    def test_cancellation_prevents_tool_side_effects(self):
+        from agent.execution import RunCancelled
+        client = FakeResponsesClient([])
+        agent = self.make_agent(client)
+        with self.assertRaises(RunCancelled):
+            agent.chat([{'role': 'user', 'content': 'start'}], FakeSession(), is_cancelled=lambda: True)
+        self.assertEqual(client.calls, [])
+
+    def test_worker_keeps_system_plan_in_instructions(self):
+        client = FakeResponsesClient([response([], output_text='done')])
+        agent = self.make_agent(client)
+        agent.chat([{'role': 'system', 'content': 'PLAN: inspect all 1000 files'},
+                    {'role': 'user', 'content': 'start'}], FakeSession())
+        self.assertIn('PLAN: inspect all 1000 files', client.calls[0]['instructions'])
+
+
 if __name__ == "__main__":
     unittest.main()

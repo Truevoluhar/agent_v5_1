@@ -50,7 +50,13 @@ def _execute(handle: RunHandle, request: RunRequest) -> RunResult:
             event_store.mark_status(handle.run_id, "running")
 
     def wait_for_input(question: str) -> str:
-        return handle.input_queue.get()
+        while not handle.cancel_event.is_set():
+            try:
+                return handle.input_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+        from agent.execution import RunCancelled
+        raise RunCancelled()
 
     def is_cancelled() -> bool:
         return handle.cancel_event.is_set()

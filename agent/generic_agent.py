@@ -1,4 +1,9 @@
 import json
+import uuid
+from pathlib import Path
+
+from agent.execution import BudgetExhausted, RunCancelled, EXECUTION_POLICY
+from agent.work_queue import WorkQueue
 from typing import Any, Callable, Union
 
 from openai import OpenAI, DefaultHttpx2Client
@@ -111,70 +116,6 @@ class GenericAgent:
 
 
 
-    """
-    def chat(self, messages: list[dict], session: Session) -> str:
-
-        tools = get_tool_schemas()
-
-        msgs = list(messages)
-
-        request_messages = [
-            {"role": "system", "content": self.system_message },
-            *msgs
-        ]
-        
-        print(request_messages)
-        
-        for _ in range(10):
-            
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=request_messages,
-                temperature=self.temperature,
-                timeout=None,
-                tool_choice="auto",
-                tools=tools,
-                reasoning_effort="medium"
-            )
-
-            message = response.choices[0].message
-            # print(message)
-
-            request_messages.append(message)
-            session.add_message(message=self._assistant_message_to_dict(message))
-            
-            
-            if message.tool_calls:
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    arguments = json.loads(tool_call.function.arguments)
-
-                    print(f"[{self.name}]: Tool call: {tool_name}")
-                    tool_result = execute_registered_tool(
-                        workspace=self.workspace_path,
-                        tool_name=tool_name,
-                        tool_input=arguments
-                    )
-                    tool_response = {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": json.dumps(
-                            tool_result,
-                            ensure_ascii=False,
-                            default=str
-                        )
-                    }
-                    
-                    request_messages.append(tool_response)
-                    session.add_message(tool_response)
-                    
-                continue
-                    
-            else:
-                return message.content
-    """
-
-
     def _to_responses_tools(self, chat_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         response_tools: list[dict[str, Any]] = []
@@ -209,7 +150,19 @@ class GenericAgent:
         return response_tools
 
 
-    def chat(self, messages: list[dict], session: Session, emit: Callable[[str, dict], None] | None = None) -> str:
+    def chat(self, messages: list[dict], session: Session, emit: Callable[[str, dict], None] | None = None,
+             is_cancelled: Callable[[], bool] | None = None, max_iterations: int = 100) -> str:
+        is_cancelled = is_cancelled or (lambda: False)
+        def check_cancelled():
+            if is_cancelled():
+                raise RunCancelled()
+        check_cancelled()
+        scope = getattr(session, "id", "default")
+        pinned = "\n\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
+        instructions = (EXECUTION_POLICY + "\n"
+                        + self.system_message[:self.context_limits.max_system_message_chars // 2]
+                        + "\n" + pinned)
+        instructions = self.context_guard.trim_system_message(instructions)
         chat_tools = get_tool_schemas()
         tools = self._to_responses_tools(chat_tools)
 
@@ -242,7 +195,7 @@ class GenericAgent:
             try:
                 response = self.client.responses.create(
                     model=self.model,
-                    instructions=self.system_message,
+                    instructions=instructions,
                     input=bounded_input_items,
                     tools=tools,
                     tool_choice="auto",
@@ -264,7 +217,8 @@ class GenericAgent:
 
         response_input_items: list[Any] = list(bounded_input_items)
 
-        for _ in range(100):
+        for iteration in range(max_iterations + 1):
+            check_cancelled()
             tool_calls = [
                 item
                 for item in response.output
@@ -291,9 +245,13 @@ class GenericAgent:
 
                 return final_text
 
+            if iteration == max_iterations:
+                raise BudgetExhausted("Worker batch budget reached; continue from durable state.")
+
             tool_outputs: list[dict[str, Any]] = []
 
             for tool_call in tool_calls:
+                check_cancelled()
                 tool_name = tool_call.name
 
                 try:
@@ -315,9 +273,13 @@ class GenericAgent:
                             workspace=self.workspace_path,
                             tool_name=tool_name,
                             tool_input=arguments,
+                            scope=scope,
+                            is_cancelled=is_cancelled,
                         )
                         if emit is not None:
-                            emit("tool.completed", {"agent": self.name, "tool": tool_name, "ok": True})
+                            emit("tool.completed", {"agent": self.name, "tool": tool_name, "ok": bool(tool_result.get("ok", False))})
+                    except RunCancelled:
+                        raise
                     except Exception as exc:
                         # Return the error to the model so it can recover,
                         # select another tool, or explain the failure.
@@ -327,7 +289,20 @@ class GenericAgent:
                         if emit is not None:
                             emit("tool.completed", {"agent": self.name, "tool": tool_name, "ok": False})
 
+                log_dir = Path(self.workspace_path) / ".agent" / "tool-results"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                log_path = log_dir / (uuid.uuid4().hex + ".json")
+                raw_result = json.dumps(tool_result, ensure_ascii=False, default=str)
+                log_path.write_text(json.dumps({"tool": tool_name, "arguments": tool_call.arguments,
+                                                "result": tool_result}, ensure_ascii=False, default=str), encoding="utf-8")
                 serialized_result = self.context_guard.trim_tool_output(tool_result)
+                if len(raw_result) > self.context_limits.max_tool_output_chars:
+                    serialized_result = json.dumps({
+                        "ok": tool_result.get("ok", False),
+                        "preview": serialized_result[:max(100, self.context_limits.max_tool_output_chars - 500)],
+                        "full_result_path": str(log_path.relative_to(self.workspace_path)),
+                        "truncated": True,
+                    })
 
                 tool_outputs.append(
                     {
@@ -351,10 +326,14 @@ class GenericAgent:
                     *bounded_tool_outputs,
                 ]
 
+                next_input = self._compact_continuation(
+                    next_input, bounded_input_items, scope, attempt, emit,
+                )
+                check_cancelled()
                 try:
                     next_response = self.client.responses.create(
                         model=self.model,
-                        instructions=self.system_message,
+                        instructions=instructions,
                         input=next_input,
                         tools=tools,
                         tool_choice="auto",
@@ -378,7 +357,7 @@ class GenericAgent:
             response_input_items = successful_next_input
             response = next_response
 
-        raise RuntimeError("Maximum tool-call iterations reached.")
+        raise BudgetExhausted("Worker iteration budget reached; durable work can be resumed.")
 
 
 
@@ -405,6 +384,42 @@ class GenericAgent:
 
             
             
+    def _compact_continuation(self, items, original, scope, attempt, emit):
+        def serializable(item):
+            if isinstance(item, dict):
+                return item
+            if hasattr(item, "model_dump"):
+                return item.model_dump(exclude_none=True)
+            return vars(item)
+        size = len(json.dumps([serializable(i) for i in items], default=str))
+        budget = max(2000, self.context_limits.max_input_chars // attempt)
+        if size <= budget:
+            return items
+        # Restart only at a tool-round boundary: never retain orphaned call/output
+        # pairs or stale reasoning. Full evidence is already persisted on disk.
+        directory = Path(self.workspace_path) / ".agent" / "tool-results"
+        directory.mkdir(parents=True, exist_ok=True)
+        archive = directory / ("context-" + uuid.uuid4().hex + ".json")
+        archive.write_text(json.dumps([serializable(i) for i in items], default=str, ensure_ascii=False), encoding="utf-8")
+        state = WorkQueue(self.workspace_path, scope).summary()
+        state["transcript"] = str(archive.relative_to(self.workspace_path))
+        checkpoint = {
+            "role": "user",
+            "content": ("Continue the original task from this durable checkpoint. "
+                        "Earlier tool rounds were archived in .agent/tool-results; "
+                        "read relevant logs and PLAN.md as needed. Do not repeat side effects.\n"
+                        + json.dumps(state, ensure_ascii=False)),
+        }
+        recent = [serializable(i) for i in items if
+                  (i.get("type") if isinstance(i, dict) else getattr(i, "type", None)) == "function_call_output"]
+        if recent:
+            checkpoint["content"] += "\nLatest tool results: " + json.dumps(recent[-2:], default=str)[-budget // 3:]
+        seed = {"role": "user", "content": str(original[-1].get("content", ""))[:budget // 3]}
+        checkpoint["content"] = checkpoint["content"][:budget // 2]
+        if emit:
+            emit("context.compacted", {"agent": self.name, "previous_chars": size})
+        return [seed, checkpoint]
+
     def chat_without_tools(self, messages: list[dict]) -> str:
         msgs = list(messages)
         request_messages = [

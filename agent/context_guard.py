@@ -17,13 +17,14 @@ class ContextLimits:
         if not raw:
             return cls()
 
+        defaults = cls()
         values = {
-            "max_system_message_chars": int(raw.get("max_system_message_chars", cls.max_system_message_chars)),
-            "max_input_chars": int(raw.get("max_input_chars", cls.max_input_chars)),
-            "max_message_chars": int(raw.get("max_message_chars", cls.max_message_chars)),
-            "max_tool_output_chars": int(raw.get("max_tool_output_chars", cls.max_tool_output_chars)),
-            "min_recent_messages": int(raw.get("min_recent_messages", cls.min_recent_messages)),
-            "max_retries": int(raw.get("max_retries", cls.max_retries)),
+            "max_system_message_chars": int(raw.get("max_system_message_chars", defaults.max_system_message_chars)),
+            "max_input_chars": int(raw.get("max_input_chars", defaults.max_input_chars)),
+            "max_message_chars": int(raw.get("max_message_chars", defaults.max_message_chars)),
+            "max_tool_output_chars": int(raw.get("max_tool_output_chars", defaults.max_tool_output_chars)),
+            "min_recent_messages": int(raw.get("min_recent_messages", defaults.min_recent_messages)),
+            "max_retries": int(raw.get("max_retries", defaults.max_retries)),
         }
 
         return cls(**values)

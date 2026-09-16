@@ -20,7 +20,7 @@ Lokalno (brez vsebnikov) vse komponente privzeto uporabljajo `<repo>/data`. V Do
 
 ### Znane omejitve (še niso implementirane)
 
-V skladu s faznim načrtom iz PDF-ja naslednji koraki za utrditev sistema namenoma **še niso** izvedeni in jih je treba implementirati pred javno izpostavitvijo sistema: prava avtentikacija (trenutno je `username` samo vrednost obrazca oziroma poizvedbenega parametra), izolacija delovnega prostora za posamezen zagon, zaklepi izvajanja za posamezno sejo, avtorizacija/odobritev orodij, omejitve ukazov lupine, roki ter omejitve izhoda in sočasnosti ter produkcijsko primerna shramba zagonov (Postgres/Redis) za okolja z več replikami. Register zagonov v `agent-api` je shranjen v pomnilniku posameznega procesa, zato `cancel`/`input` delujeta samo za proces, ki je zagon ustvaril (trajno shranjeni dogodki in status preživijo ponovni zagon, neposreden nadzor nad aktivnim zagonom pa ne).
+V skladu s faznim načrtom iz PDF-ja naslednji koraki za utrditev sistema namenoma **še niso** izvedeni in jih je treba implementirati pred javno izpostavitvijo sistema: prava avtentikacija (trenutno je `username` samo vrednost obrazca oziroma poizvedbenega parametra), izolacija delovnega prostora za posamezen zagon, avtorizacija/odobritev orodij, omejitve ukazov lupine, produkcijske kvote izvajanja ter produkcijsko primerna shramba zagonov (Postgres/Redis) za okolja z več replikami. Register zagonov v `agent-api` je shranjen v pomnilniku posameznega procesa, zato `cancel`/`input` delujeta samo za proces, ki je zagon ustvaril (trajno shranjeni dogodki in status preživijo ponovni zagon, neposreden nadzor nad aktivnim zagonom pa ne).
 
 ## Kako zagnati
 
@@ -55,3 +55,13 @@ Izvorna koda agenta je v mapi **agent**.
 ## Izvorna koda odjemalca
 
 Izvorna koda odjemalca je v mapi **client**.
+## Large tasks and resumable execution
+
+The runtime now supports a durable per-session work queue, file inventory and
+coverage verification, context checkpoints with archived tool results, worker
+batch continuation, workspace execution locks, and cancellable foreground shell
+commands with bounded output. Step exhaustion no longer reports success.
+
+See [Large-task execution](docs/large-tasks.md) for the tool workflow, configuration,
+resume instructions, tests, and remaining limitations. Resume unfinished work with
+the same session ID and workspace; use a new session for an independent objective.

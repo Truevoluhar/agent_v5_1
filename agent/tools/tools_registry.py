@@ -1,7 +1,9 @@
+from agent.execution import RunCancelled
 from dataclasses import dataclass
 from typing import Optional, Callable
 
 from agent.tools.tools_models import Tool, ToolResult
+from agent.tools.work_queue import WORK_QUEUE_TOOL
 from agent.tools.shell import RUN_SHELL_TOOL
 from agent.tools.plan import READ_PLAN_TOOL, CREATE_OR_UPDATE_PLAN_TOOL
 from agent.tools.drawio import READ_DRAWIO_REFERENCE_TOOL, UPSERT_DRAWIO_DIAGRAM_TOOL
@@ -11,6 +13,7 @@ from agent.tools.getAssetWhereUsed import GET_ASSET_WHERE_USED_TOOL
 
 TOOLS = {
     tool.name: tool for tool in [
+        WORK_QUEUE_TOOL,
         RUN_SHELL_TOOL,
         READ_PLAN_TOOL,
         CREATE_OR_UPDATE_PLAN_TOOL,
@@ -28,7 +31,9 @@ TOOLS = {
 def execute_registered_tool(
         workspace: str,
         tool_name: str,
-        tool_input: dict
+        tool_input: dict,
+        scope: str = "default",
+        is_cancelled=None,
 ) -> dict:
     
     tool = TOOLS.get(tool_name)
@@ -44,6 +49,11 @@ def execute_registered_tool(
     try:
 
         executor_kwargs = dict(tool_input)
+        if tool_name == "work_queue":
+            executor_kwargs["scope"] = scope
+
+        if tool_name == "run_shell":
+            executor_kwargs["is_cancelled"] = is_cancelled
 
         result = tool.executor(workspace=workspace, **executor_kwargs)
 
@@ -54,6 +64,8 @@ def execute_registered_tool(
             "metadata": result.metadata or {}
         }
 
+    except RunCancelled:
+        raise
     except TypeError as e:
         return {
             "ok": False,
@@ -65,7 +77,7 @@ def execute_registered_tool(
         return {
             "ok": False,
             "output": None,
-            "error": {str(e)},
+            "error": str(e),
             "metadata": {}
         }
     
