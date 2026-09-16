@@ -6,8 +6,9 @@ from agent.execution import BudgetExhausted, RunCancelled, EXECUTION_POLICY
 from agent.work_queue import WorkQueue
 from typing import Any, Callable, Union
 
-from openai import OpenAI, DefaultHttpx2Client
+from openai import OpenAI
 
+from agent.llm import create_client, generation_options, create_tool_response
 from agent.context_guard import ContextLimits, ContextWindowGuard
 from agent.tools.tools_registry import get_tool_schemas, execute_registered_tool
 from agent.session import Session
@@ -49,7 +50,9 @@ class GenericAgent:
         resources_path,
         workspace_path,
         context_limits: dict[str, Any] | None = None,
+        llm_options: dict[str, Any] | None = None,
     ):
+        self.llm_options = dict(llm_options or {})
         self.id = id
         
         self.name = name
@@ -106,13 +109,7 @@ class GenericAgent:
     
     def init_client(self) -> None:
 
-        client_kwargs = { "api_key": self.api_key }
-        
-        if self.base_url:
-            client_kwargs["base_url"] = self.base_url
-
-        client = OpenAI(**client_kwargs, http_client=DefaultHttpx2Client(verify=False))
-        return client
+        return create_client(self.api_key, self.base_url, self.llm_options)
 
 
 
@@ -193,16 +190,13 @@ class GenericAgent:
                 raise ValueError("No user or assistant messages remained after bounding input.")
 
             try:
-                response = self.client.responses.create(
+                response = create_tool_response(self.client,
                     model=self.model,
                     instructions=instructions,
                     input=bounded_input_items,
                     tools=tools,
-                    tool_choice="auto",
-                    store=False,
-                    reasoning={
-                        "effort": "medium",
-                    },
+                    options=self.llm_options,
+                    temperature=self.temperature,
                 )
                 break
             except Exception as exc:
@@ -331,16 +325,13 @@ class GenericAgent:
                 )
                 check_cancelled()
                 try:
-                    next_response = self.client.responses.create(
+                    next_response = create_tool_response(self.client,
                         model=self.model,
                         instructions=instructions,
                         input=next_input,
                         tools=tools,
-                        tool_choice="auto",
-                        store=False,
-                        reasoning={
-                            "effort": "medium",
-                        },
+                        options=self.llm_options,
+                        temperature=self.temperature,
                     )
                     successful_next_input = next_input
                     break
@@ -440,8 +431,7 @@ class GenericAgent:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=bounded_messages,
-                    temperature=self.temperature,
-                    timeout=None,
+                    **generation_options(self.llm_options, self.temperature),
                 )
                 break
             except Exception as exc:

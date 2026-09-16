@@ -170,6 +170,20 @@ class WorkQueue:
             db.execute("UPDATE tasks SET status='pending',source_hash=?,cursor=0,attempts=0,evidence=NULL,artifacts='[]',error=NULL WHERE id=?", (source_hash, task_id))
         return {'reset': task_id}
 
+    def completion_report(self):
+        """Give final synthesis actual artifact paths, not just recent chat claims."""
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute(
+                "SELECT id,title,source,evidence,artifacts FROM tasks WHERE status='completed' ORDER BY id")]
+        for row in rows:
+            row['artifacts'] = json.loads(row['artifacts'])
+        report_path = self.path.with_suffix('.report.json')
+        report_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding='utf-8')
+        artifacts = sorted({artifact['path'] for row in rows for artifact in row['artifacts']})
+        return {'completed_tasks': len(rows), 'artifact_count': len(artifacts),
+                'artifact_paths': artifacts[:25], 'paths_truncated': len(artifacts) > 25,
+                'full_report': str(report_path.relative_to(self.root))}
+
     def verify(self):
         invalid = []
         with self.connect() as db:

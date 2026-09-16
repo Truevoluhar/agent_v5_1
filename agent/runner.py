@@ -11,11 +11,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
-import traceback
+import logging
+from dotenv import load_dotenv
+from agent.llm import create_client, generation_options
 
 
 import yaml
-from openai import OpenAI, DefaultHttpx2Client
 
 from agent.execution import RunCancelled, BudgetExhausted, EXECUTION_POLICY, workspace_lock
 from agent.work_queue import WorkQueue
@@ -87,7 +88,9 @@ def _planner_name(agents: list[GenericAgent]) -> str | None:
 class AgentRunner:
     """Loads config once and executes runs against it."""
 
-    def __init__(self, config_path: str = CONFIG_PATH):
+    def __init__(self, config_path: str | None = None):
+        load_dotenv(AGENT_ROOT.parent / ".env", override=False)
+        config_path = config_path or os.getenv("AGENT_CONFIG_PATH") or CONFIG_PATH
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
 
@@ -116,6 +119,7 @@ class AgentRunner:
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
 
+        options = config.get("llm", {}) or {}
         agents_config = config["agents"]
         orchestrator_config = config["orchestrator_agent"]
         response_agent_config = config.get("response_agent")
@@ -156,7 +160,7 @@ class AgentRunner:
             session.set_name(
                 self._generate_session_name(
                     prompt=request.prompt,
-                    agent_config=orchestrator_config,
+                    agent_config={**orchestrator_config, "llm": {**options, **orchestrator_config.get("llm", {})}},
                     context_limits=context_limits,
                 )
             )
@@ -178,6 +182,7 @@ class AgentRunner:
                     resources_path=agent_resources,
                     workspace_path=agent_workspace,
                     context_limits=context_limits,
+                    llm_options={**options, **agent_data.get("llm", {})},
                 )
             )
 
@@ -194,6 +199,7 @@ class AgentRunner:
             workspace_path=agent_workspace,
             available_agents=available_agents,
             context_limits=context_limits,
+            llm_options={**options, **orchestrator_config.get("llm", {})},
         )
 
         response_agent = None
@@ -209,6 +215,7 @@ class AgentRunner:
                 workspace_path=agent_workspace,
                 response_schema_source=response_schema_source,
                 context_limits=context_limits,
+                llm_options={**options, **response_agent_config.get("llm", {})},
             )
 
         session.add_message({"role": "user", "content": request.prompt})
@@ -261,125 +268,29 @@ class AgentRunner:
         if not input_items:
             return fallback_name
 
-        client_kwargs = {"api_key": os.getenv(agent_config["api_key"])}
-        if agent_config.get("base_url"):
-            client_kwargs["base_url"] = agent_config["base_url"]
-
-        try:
-            client = OpenAI(
-                **client_kwargs,
-                http_client=DefaultHttpx2Client(verify=False),
-            )
-        except Exception as exc:
-            print("[Session] Failed to create OpenAI client")
-            print(f"[Session] Exception type: {type(exc).__name__}")
-            print(f"[Session] Exception: {exc!r}")
-            traceback.print_exception(
-                type(exc),
-                exc,
-                exc.__traceback__,
-                chain=True,
-            )
-            return fallback_name
-
+        options = agent_config.get("llm", {}) or {}
         instructions = (
-            "Create a concise, descriptive title for this new conversation. "
-            "Return only the title, with no quotation marks, markdown, or punctuation at the end. "
-            "Use at most 8 words."
+            "Create a concise, descriptive title for this conversation. "
+            "Return only the title, at most 8 words, with no quotes or markdown."
         )
-
-        last_error: Exception | None = None
-
-        for attempt in range(1, guard.limits.max_retries + 1):
-            try:
-                response = client.responses.create(
-                    model=agent_config["model"],
-                    instructions=instructions,
-                    input=guard.trim_response_input_items(
-                        input_items,
-                        attempt=attempt,
-                    ),
-                    temperature=agent_config.get("temperature", 1.0),
-                )
-
-                title = " ".join(
-                    (response.output_text or "").split()
-                )[:120]
-
-                return title or fallback_name
-
-            except Exception as exc:
-                last_error = exc
-
-                print(
-                    f"\n[Session] LLM call failed on attempt {attempt}/"
-                    f"{guard.limits.max_retries}"
-                )
-                print(
-                    f"[Session] Exception type: "
-                    f"{type(exc).__module__}.{type(exc).__name__}"
-                )
-                print(f"[Session] Exception repr: {exc!r}")
-                print(f"[Session] Exception str: {exc}")
-
-                # Full traceback including chained causes such as:
-                # httpcore -> httpx -> openai.APIConnectionError
-                print("[Session] Full traceback:")
-                traceback.print_exception(
-                    type(exc),
-                    exc,
-                    exc.__traceback__,
-                    chain=True,
-                )
-
-                # Print direct cause explicitly as well.
-                if exc.__cause__ is not None:
-                    cause = exc.__cause__
-                    level = 1
-
-                    while cause is not None:
-                        print(
-                            f"[Session] Cause #{level}: "
-                            f"{type(cause).__module__}."
-                            f"{type(cause).__name__}: {cause!r}"
-                        )
-                        cause = cause.__cause__
-                        level += 1
-
-                # Useful for OpenAI HTTP errors.
-                request = getattr(exc, "request", None)
-                if request is not None:
+        try:
+            with create_client(os.getenv(agent_config["api_key"]), agent_config.get("base_url"), options) as client:
+                for attempt in range(1, guard.limits.max_retries + 1):
                     try:
-                        print(
-                            f"[Session] Request: "
-                            f"{request.method} {request.url}"
+                        response = client.chat.completions.create(
+                            model=agent_config["model"],
+                            messages=[{"role": "system", "content": instructions},
+                                      *guard.trim_response_input_items(input_items, attempt=attempt)],
+                            **generation_options(options, agent_config.get("temperature", 1.0)),
                         )
-                    except Exception:
-                        pass
-
-                response = getattr(exc, "response", None)
-                if response is not None:
-                    try:
-                        print(
-                            f"[Session] HTTP status: "
-                            f"{response.status_code}"
-                        )
-                        print(
-                            f"[Session] HTTP response: "
-                            f"{response.text}"
-                        )
-                    except Exception:
-                        pass
-
-                if not guard.is_context_length_error(exc):
-                    break
-
-        if last_error is not None:
-            print(
-                f"[Session] Could not generate session name: "
-                f"{last_error!r}"
-            )
-
+                        title = " ".join((response.choices[0].message.content or "").split())[:120]
+                        return title or fallback_name
+                    except Exception as exc:
+                        if not guard.is_context_length_error(exc):
+                            raise
+        except Exception as exc:
+            # Naming must not block a run or dump request/credential details.
+            logging.getLogger(__name__).warning("Session title unavailable (%s)", type(exc).__name__)
         return fallback_name
 
     def _run_loop(
@@ -555,7 +466,10 @@ class AgentRunner:
                     final_messages.append(
                         {
                             "role": "user",
-                            "content": "Summarize the completed work in the required JSON structure.",
+                            "content": ("Summarize the completed work in the required JSON structure. "
+                                        "Use the following verified artifact paths and counts as evidence. "
+                                        "Never invent filenames or claim content was tested without evidence.\n"
+                                        + json.dumps(queue.completion_report())),
                         }
                     )
                     final_response = response_agent.chat_structured(

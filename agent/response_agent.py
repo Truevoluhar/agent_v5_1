@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
+from agent.llm import generation_options
 from agent.context_guard import ContextLimits, ContextWindowGuard
 from agent.generic_agent import GenericAgent
 from agent.session import Session
@@ -146,6 +147,7 @@ class ResponseAgent(GenericAgent):
         workspace_path,
         response_schema_source: str | Path | dict[str, Any] | None = None,
         context_limits: dict[str, Any] | None = None,
+        llm_options: dict[str, Any] | None = None,
     ):
         self.response_schema_source = response_schema_source
         super().__init__(
@@ -158,6 +160,7 @@ class ResponseAgent(GenericAgent):
             resources_path=resources_path,
             workspace_path=workspace_path,
             context_limits=context_limits,
+            llm_options=llm_options,
         )
 
     def chat_structured(
@@ -193,8 +196,7 @@ class ResponseAgent(GenericAgent):
                     model=self.model,
                     messages=bounded_messages,
                     response_format=response_model,
-                    temperature=self.temperature,
-                    timeout=None,
+                    **generation_options(self.llm_options, self.temperature),
                 )
                 break
             except Exception as exc:

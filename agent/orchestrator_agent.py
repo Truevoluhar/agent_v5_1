@@ -5,9 +5,10 @@ from typing import Any, Type, Literal, Optional, Union, TypeVar
 from dataclasses import dataclass, asdict, is_dataclass
 
 import uuid
-from openai import OpenAI, DefaultHttpx2Client
+from openai import OpenAI
 from pydantic import BaseModel, Field, create_model, model_validator, ConfigDict
 
+from agent.llm import create_client, generation_options, normalize_chat_messages
 from agent.context_guard import ContextLimits, ContextWindowGuard
 from agent.session import Session
 from agent.generic_agent import GenericAgent
@@ -120,7 +121,9 @@ class OrchestratorAgent:
         workspace_path,
         available_agents,
         context_limits: dict[str, Any] | None = None,
+        llm_options: dict[str, Any] | None = None,
     ):
+        self.llm_options = dict(llm_options or {})
         self.id = id
         
         self.name = name
@@ -171,13 +174,7 @@ class OrchestratorAgent:
     
     def init_client(self) -> None:
 
-        client_kwargs = { "api_key": self.api_key }
-        
-        if self.base_url:
-            client_kwargs["base_url"] = self.base_url
-
-        client = OpenAI(**client_kwargs, http_client=DefaultHttpx2Client(verify=False))
-        return client
+        return create_client(self.api_key, self.base_url, self.llm_options)
     
 
     def create_system_message(self):
@@ -218,8 +215,7 @@ class OrchestratorAgent:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=bounded_messages,
-                    temperature=self.temperature,
-                    timeout=None,
+                    **generation_options(self.llm_options, self.temperature),
                 )
                 break
             except Exception as exc:
@@ -254,14 +250,13 @@ class OrchestratorAgent:
                 request_messages,
                 attempt=attempt,
             )
-            bounded_messages.insert(0, {"role": "system", "content": self.system_message})
+            bounded_messages = normalize_chat_messages(bounded_messages, self.system_message)
             try:
                 completion = self.client.beta.chat.completions.parse(
                     model=self.model,
                     messages=bounded_messages,
                     response_format=self.response_model,
-                    temperature=self.temperature,
-                    reasoning_effort="medium",
+                    **generation_options(self.llm_options, self.temperature),
                 )
                 break
             except Exception as exc:
@@ -322,8 +317,7 @@ class OrchestratorAgent:
                     completion = self.client.chat.completions.create(
                         model=self.model,
                         messages=bounded_messages,
-                        temperature=self.temperature,
-                        timeout=None,
+                        **generation_options(self.llm_options, self.temperature),
                         tools=tools,
                         tool_choice="auto",
                     )
@@ -441,8 +435,7 @@ class OrchestratorAgent:
                     model=self.model,
                     messages=bounded_messages,
                     response_format=response_model,
-                    temperature=self.temperature,
-                    timeout=None,
+                    **generation_options(self.llm_options, self.temperature),
                 )
                 break
             except Exception as exc:

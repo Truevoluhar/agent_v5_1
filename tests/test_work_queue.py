@@ -23,6 +23,21 @@ class WorkQueueTests(unittest.TestCase):
         with workspace_lock(self.root):
             pass
 
+    def test_completion_report_contains_verified_output_paths(self):
+        import json
+        (self.root / 'source.py').write_text('value = 1')
+        self.queue.inventory('.', '*.py', 'document')
+        task = self.queue.claim()
+        self.queue.read(task['id'])
+        (self.root / 'actual.md').write_text('value is one')
+        self.queue.finish(task['id'], 'Read source and checked output', ['actual.md'])
+        report = self.queue.completion_report()
+        self.assertEqual(report['artifact_paths'], ['actual.md'])
+        self.assertEqual(report['completed_tasks'], 1)
+        saved = json.loads((self.root / report['full_report']).read_text())
+        self.assertEqual(saved[0]['source'], 'source.py')
+        self.assertEqual(saved[0]['artifacts'][0]['path'], 'actual.md')
+
     def test_thousand_files_resume_and_verify_exact_coverage(self):
         source = self.root / 'src'
         source.mkdir()

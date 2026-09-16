@@ -18,7 +18,7 @@ except ModuleNotFoundError:
             pass
 
     openai_stub.OpenAI = OpenAIStub
-    openai_stub.DefaultHttpx2Client = lambda **kwargs: None
+    openai_stub.DefaultHttpxClient = lambda **kwargs: None
     sys.modules["openai"] = openai_stub
 
 from agent.generic_agent import GenericAgent
@@ -69,6 +69,7 @@ class GenericAgentResponsesTests(unittest.TestCase):
                 temperature=0,
                 resources_path=str(Path(temp_dir) / "resources"),
                 workspace_path=temp_dir,
+                llm_options={"api_mode": "responses"},
             )
 
         agent.client = client

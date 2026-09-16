@@ -65,3 +65,5 @@ commands with bounded output. Step exhaustion no longer reports success.
 See [Large-task execution](docs/large-tasks.md) for the tool workflow, configuration,
 resume instructions, tests, and remaining limitations. Resume unfinished work with
 the same session ID and workspace; use a new session for an independent objective.
+
+See [OpenAI and vLLM configuration](docs/provider-compatibility.md) for provider switching, message compatibility, and the opt-in live smoke test.

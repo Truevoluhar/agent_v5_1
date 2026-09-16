@@ -1,3 +1,4 @@
+import os
 import argparse
 import json
 import sqlite3
@@ -66,14 +67,15 @@ def main():
     args = parser.parse_args()
 
     # Naložimo okoljske spremenljivke iz .env datoteke
-    load_dotenv()
+    load_dotenv(AGENT_ROOT.parent / ".env")
+    config_path = os.getenv("AGENT_CONFIG_PATH") or CONFIG_PATH
 
     if args.test == "true":
         run_tests()
         return
 
     # CONFIG LOAD (only needed here to list/select existing sessions before delegating to AgentRunner)
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     try:
@@ -121,7 +123,7 @@ def main():
         max_context_chars=args.max_context_chars,
     )
 
-    runner = AgentRunner(config_path=CONFIG_PATH)
+    runner = AgentRunner(config_path=config_path)
     result = runner.run(
         request,
         emit=ConsoleEventSink(),

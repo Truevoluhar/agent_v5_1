@@ -2,6 +2,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from agent.messages import normalize_chat_messages
+
 
 @dataclass(slots=True)
 class ContextLimits:
@@ -123,25 +125,7 @@ class ContextWindowGuard:
             break
 
         ordered_messages = list(reversed(selected_reversed))
-        system_messages = [
-            message for message in ordered_messages
-            if message.get("role") == "system"
-        ]
-        non_system_messages = [
-            message for message in ordered_messages
-            if message.get("role") != "system"
-        ]
-        if not system_messages:
-            return non_system_messages
-
-        merged_system_message = {
-            "role": "system",
-            "content": "\n\n".join(
-                message.get("content", "")
-                for message in system_messages
-            ),
-        }
-        return [merged_system_message, *non_system_messages]
+        return normalize_chat_messages(ordered_messages)
 
     def trim_response_input_items(
         self,
