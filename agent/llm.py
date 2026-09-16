@@ -1,4 +1,5 @@
 """Provider-neutral request formatting for OpenAI and OpenAI-compatible servers."""
+import os
 import re
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -49,12 +50,20 @@ def create_client(api_key, base_url, options=None):
     options = options or {}
     if not api_key:
         raise ValueError("Configured LLM API key is missing; check the api_key environment variable named in config")
+    verify = resolve_ssl_verification(base_url, options.get('verify_ssl', 'auto'))
+    if verify is True:
+        verify = options.get('ca_bundle') or os.getenv('VLLM_CA_BUNDLE') or os.getenv('SSL_CERT_FILE') or verify
+    client_cert = options.get('client_cert') or os.getenv('CLIENT_CERT')
+    client_key = options.get('client_key') or os.getenv('CLIENT_KEY')
+    http_options = {'verify': verify}
+    if client_cert or client_key:
+        if not client_cert or not client_key:
+            raise ValueError("Both CLIENT_CERT and CLIENT_KEY are required for client-certificate authentication")
+        http_options['cert'] = (client_cert, client_key)
     return OpenAI(
         api_key=api_key, **({'base_url': base_url} if base_url else {}),
         timeout=options.get('timeout', 120), max_retries=options.get('max_retries', 2),
-        http_client=DefaultHttpxClient(
-            verify=resolve_ssl_verification(base_url, options.get('verify_ssl', 'auto'))
-        ),
+        http_client=DefaultHttpxClient(**http_options),
     )
 
 
