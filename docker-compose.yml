@@ -11,8 +11,9 @@ services:
       # container fully offline-capable; SQLite/lexical memory remains active.
       - AGENT_SEMANTIC_MEMORY=disabled
 
-      - CLIENT_CERT=/app/client_certs/client.crt
-      - CLIENT_KEY=/app/client_certs/client.key
+      - VLLM_CA_BUNDLE=/app/certs/ZPIZCA.pem
+      - CLIENT_CERT=/app/client_certs/server.crt
+      - CLIENT_KEY=/app/client_certs/server.key
     # This managed environment blocks outbound traffic from Docker bridge
     # networks. Host networking was explicitly approved for these local images.
     network_mode: host
@@ -35,8 +36,9 @@ services:
     environment:
       - AGENT_DATA_ROOT=/data
       - AGENT_SEMANTIC_MEMORY=disabled
-      - CLIENT_CERT=/app/client_certs/client.crt
-      - CLIENT_KEY=/app/client_certs/client.key
+      - VLLM_CA_BUNDLE=/app/certs/ZPIZCA.pem
+      - CLIENT_CERT=/app/client_certs/server.crt
+      - CLIENT_KEY=/app/client_certs/server.key
     network_mode: host
     volumes:
       - ./data:/data
