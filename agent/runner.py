@@ -8,19 +8,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
-import logging
 from dotenv import load_dotenv
-from agent.llm import create_client, generation_options
 
 
 import yaml
 
 from agent.execution import RunCancelled, BudgetExhausted, EXECUTION_POLICY, workspace_lock
 from agent.work_queue import WorkQueue
-from agent.context_guard import ContextLimits, ContextWindowGuard
 from agent.events import EventEmitter, EventSink
 from agent.generic_agent import GenericAgent
 from agent.orchestrator_agent import OrchestratorAgent
@@ -157,13 +155,7 @@ class AgentRunner:
             memory_folder=user_storage.memory_folder,
         )
         if session.is_new:
-            session.set_name(
-                self._generate_session_name(
-                    prompt=request.prompt,
-                    agent_config={**orchestrator_config, "llm": {**options, **orchestrator_config.get("llm", {})}},
-                    context_limits=context_limits,
-                )
-            )
+            session.set_name(self._generate_session_name(request.prompt))
 
         run_id = request.run_id or session.id
         emitter = EventEmitter(run_id=run_id, session_id=session.id, sink=emit)
@@ -253,45 +245,17 @@ class AgentRunner:
 
 
     @staticmethod
-    def _generate_session_name(
-        *,
-        prompt: str,
-        agent_config: dict[str, Any],
-        context_limits: dict[str, Any],
-    ) -> str:
-        fallback_name = "New chat"
-        guard = ContextWindowGuard(ContextLimits.from_dict(context_limits))
-        input_items = guard.trim_response_input_items(
-            [{"role": "user", "content": prompt}],
-            attempt=1,
-        )
-        if not input_items:
-            return fallback_name
+    def _generate_session_name(prompt: str) -> str:
+        """Create a useful title without making an extra provider request.
 
-        options = agent_config.get("llm", {}) or {}
-        instructions = (
-            "Create a concise, descriptive title for this conversation. "
-            "Return only the title, at most 8 words, with no quotes or markdown."
-        )
-        try:
-            with create_client(os.getenv(agent_config["api_key"]), agent_config.get("base_url"), options) as client:
-                for attempt in range(1, guard.limits.max_retries + 1):
-                    try:
-                        response = client.chat.completions.create(
-                            model=agent_config["model"],
-                            messages=[{"role": "system", "content": instructions},
-                                      *guard.trim_response_input_items(input_items, attempt=attempt)],
-                            **generation_options(options, agent_config.get("temperature", 1.0)),
-                        )
-                        title = " ".join((response.choices[0].message.content or "").split())[:120]
-                        return title or fallback_name
-                    except Exception as exc:
-                        if not guard.is_context_length_error(exc):
-                            raise
-        except Exception as exc:
-            # Naming must not block a run or dump request/credential details.
-            logging.getLogger(__name__).warning("Session title unavailable (%s)", type(exc).__name__)
-        return fallback_name
+        Session naming is metadata and must not delay, consume tokens from, or
+        produce misleading connection warnings before the actual run starts.
+        """
+        plain_text = re.sub(r"[`#*_>\[\]{}()]", " ", str(prompt or ""))
+        words = plain_text.split()
+        if not words:
+            return "New chat"
+        return " ".join(words[:8])[:120]
 
     def _run_loop(
         self,

@@ -1,10 +1,14 @@
 # OpenAI and vLLM configuration
 
 The runtime uses Chat Completions by default for orchestration, worker tools,
-session titles, and final structured responses. Every chat request merges system
+and final structured responses. Every chat request merges system
 and developer instructions into one system message at index zero. This avoids the
 `System message must be at the beginning` error from templates that reject a
 second system message. Context retries use the same normalization.
+
+New-session titles are derived locally from the first eight words of the prompt.
+They do not make a separate provider request, so a title cannot delay a run,
+consume model tokens, or emit a misleading connection warning before execution.
 
 The OpenAI profile in `agent/config.yml` uses `gpt-4.1-mini`. The former internal
 Qwen model ID is not an OpenAI model ID; changing the URL alone is insufficient.

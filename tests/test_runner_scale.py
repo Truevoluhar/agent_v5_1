@@ -26,6 +26,16 @@ class SessionStub:
 
 
 class RunnerScaleTests(unittest.TestCase):
+    def test_session_title_is_local_bounded_and_readable(self):
+        title = AgentRunner._generate_session_name(
+            "# Inspect **one thousand** files and create `README.md` for each"
+        )
+        self.assertEqual(title, "Inspect one thousand files and create README.md for")
+        self.assertLessEqual(len(title.split()), 8)
+
+    def test_empty_prompt_uses_default_session_title(self):
+        self.assertEqual(AgentRunner._generate_session_name("  \n"), "New chat")
+
     def run_loop(self, workspace, decision, agents=None, steps=2):
         orchestrator = SimpleNamespace(chat_structured=lambda **kwargs: decision)
         emitter = SimpleNamespace(emit=lambda *args: None)
