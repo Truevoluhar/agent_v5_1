@@ -40,7 +40,7 @@ llm:
   api_mode: chat_completions
   reasoning_effort: null
   timeout: 120
-  verify_ssl: true
+  verify_ssl: auto
   extra_body: {}
 ```
 
@@ -48,9 +48,10 @@ llm:
 accepts `medium`. Set a supported value explicitly when needed. Role
 `temperature: null` similarly omits temperature. Provider-specific parameters,
 such as supported chat-template settings, can be supplied through `extra_body`.
-The internal profile retains the previous disabled certificate verification;
-`verify_ssl` also accepts a CA-bundle path for internal TLS, or `true` for trusted
-certificates. The OpenAI profile verifies certificates.
+`verify_ssl: auto` disables certificate verification only when the base URL's exact
+hostname is `api.openai.com`. Internal vLLM and every other hostname keep
+verification enabled. Explicit `true` and `false` values remain supported, and a
+CA-bundle path can be used for internal TLS. The bundled vLLM profile uses `true`.
 
 `api_mode: responses` remains available for workers on servers that support it.
 The worker preserves stateless tool history and encrypted reasoning on that path.
@@ -90,6 +91,38 @@ tool calls, and vLLM reasoning replay. A simulated server establishes request
 compatibility, not successful execution on a specific internal deployment.
 
 Final-response synthesis also receives verified artifact paths from the durable work ledger. The complete evidence is saved in `.agent/work/*.report.json`, avoiding dependence on older chat messages that may have been compacted.
+
+## Offline semantic memory
+
+Chroma's default embedding function downloads an ONNX model the first time a
+message is indexed. The Docker services set `AGENT_SEMANTIC_MEMORY=disabled` so a
+container without external DNS can run normally. Durable SQLite session history,
+recent-message context, summaries, and lexical retrieval remain available.
+
+Set `AGENT_SEMANTIC_MEMORY=auto` after making the embedding model available to the
+container if vector retrieval is wanted. In auto mode, initialization, embedding,
+or query failures disable vector retrieval for that process and emit one warning;
+they no longer fail the run. `enabled` has the same runtime fallback but warns
+when Chroma is not installed.
+
+## Docker bridge without outbound access
+
+In some managed development environments, Docker bridge containers cannot reach
+external TCP endpoints even though the host and image builder can. Confirm this
+before changing networking: DNS queries fail inside the running container and a
+direct TCP connection to a host-resolved API address times out.
+
+For this managed environment, the trusted local agent services use host
+networking in the base Compose file:
+
+```bash
+docker compose up -d --force-recreate agent-api
+```
+
+There is no `8100:8100` mapping because `agent-api` binds directly to the host's
+port 8100. Host networking removes Docker's network namespace isolation, so use it
+only for the trusted local image. On deployments with working bridge egress,
+remove `network_mode: host` and restore the `8100:8100` port mapping.
 
 Validation for this change: 50 local tests passed. The final OpenAI smoke test
 using `gpt-4.1-mini` completed in 47.1 seconds with 3/3 source tasks complete,

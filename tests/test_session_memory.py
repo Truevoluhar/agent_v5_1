@@ -2,11 +2,43 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import MethodType
+from unittest.mock import patch
 
+from agent.semantic_memory import SemanticMemoryIndex
 from agent.session import Session
 
 
 class SessionMemoryTests(unittest.TestCase):
+
+    def test_embedding_download_failure_does_not_break_session_storage(self):
+        class OfflineCollection:
+            def get(self, **kwargs):
+                return {"ids": []}
+
+            def add(self, **kwargs):
+                raise ConnectionError("temporary DNS failure")
+
+        index = SemanticMemoryIndex.__new__(SemanticMemoryIndex)
+        index.persist_path = Path(".")
+        index.collection_name = "test"
+        index.client = object()
+        index.collection = OfflineCollection()
+        index.available = True
+        index.disabled_reason = None
+
+        self.assertFalse(index.add_message("session", 1, "saved in SQLite"))
+        self.assertFalse(index.available)
+        self.assertIn("ConnectionError", index.disabled_reason)
+        self.assertEqual(index.search_sessions(Path("."), "session", "saved"), [])
+
+    def test_disabled_semantic_memory_does_not_initialize_chroma(self):
+        with patch.dict("os.environ", {"AGENT_SEMANTIC_MEMORY": "disabled"}):
+            with patch("agent.semantic_memory.PersistentClient") as client:
+                index = SemanticMemoryIndex("unused")
+
+        client.assert_not_called()
+        self.assertFalse(index.available)
+        self.assertEqual(index.search_sessions(Path("."), "session", "query"), [])
 
     def test_short_term_and_long_term_memory_are_bounded(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -71,7 +103,7 @@ class SessionMemoryTests(unittest.TestCase):
             self.assertTrue(all(item["session_id"] == "session-2" for item in matches))
             self.assertTrue(all(item["session_id"] == "session-2" for item in semantic_matches))
 
-    def test_add_message_is_indexed_into_chroma_immediately(self):
+    def test_add_message_is_available_to_memory_immediately(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             session_dir = temp_path / "session"
@@ -90,7 +122,12 @@ class SessionMemoryTests(unittest.TestCase):
             )
             session.add_message({"role": "user", "content": "deployment is stable"})
 
-            self.assertGreater(session.semantic_index.collection.count(), 0)
+            if session.semantic_index.available:
+                self.assertGreater(session.semantic_index.collection.count(), 0)
+            else:
+                matches = session.retrieve_past_sessions("deployment", limit=5)
+                self.assertEqual(len(matches), 1)
+                self.assertEqual(matches[0]["payload"]["content"], "deployment is stable")
 
     def test_hybrid_retrieval_fuses_semantic_and_lexical_history(self):
         with tempfile.TemporaryDirectory() as temp_dir:

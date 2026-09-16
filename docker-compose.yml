@@ -7,9 +7,15 @@ services:
       - .env
     environment:
       - AGENT_DATA_ROOT=/data
+      # Chroma otherwise downloads an ONNX model on first message. Keep the
+      # container fully offline-capable; SQLite/lexical memory remains active.
+      - AGENT_SEMANTIC_MEMORY=disabled
 
       - CLIENT_CERT=/app/client_certs/client.crt
       - CLIENT_KEY=/app/client_certs/client.key
+    # This managed environment blocks outbound traffic from Docker bridge
+    # networks. Host networking was explicitly approved for these local images.
+    network_mode: host
     volumes:
       - ./data:/data
       - /home/Z66176/Public/key:/app/client_certs:ro,z
@@ -28,15 +34,14 @@ services:
       - .env
     environment:
       - AGENT_DATA_ROOT=/data
+      - AGENT_SEMANTIC_MEMORY=disabled
       - CLIENT_CERT=/app/client_certs/client.crt
       - CLIENT_KEY=/app/client_certs/client.key
+    network_mode: host
     volumes:
       - ./data:/data
       - /home/Z66176/Public/key:/app/client_certs:ro,z
       - /etc/pki/ca-trust/source/anchors:/app/certs:rw,z
-    ports:
-      - "8100:8100"
-
   client:
     build:
       context: .
@@ -47,4 +52,3 @@ services:
       - ./data:/data
     ports:
       - "8000:8000"
-

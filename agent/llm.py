@@ -1,9 +1,48 @@
 """Provider-neutral request formatting for OpenAI and OpenAI-compatible servers."""
+import re
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from openai import OpenAI, DefaultHttpxClient
 
 from agent.messages import normalize_chat_messages
+
+
+PUBLIC_OPENAI_API_HOSTS = frozenset({'api.openai.com'})
+
+
+def safe_endpoint(base_url):
+    """Return only scheme and host, never credentials, paths, or query data."""
+    parsed = urlsplit(str(base_url or ""))
+    if not parsed.scheme or not parsed.hostname:
+        return "unconfigured"
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme}://{parsed.hostname}{port}"
+
+
+def safe_exception_summary(exc, max_chars=1800):
+    """Expose useful transport causes without leaking credentials."""
+    parts = []
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen and len(parts) < 8:
+        seen.add(id(current))
+        text = " ".join(str(current).split()) or "no message"
+        text = re.sub(r"(?i)(authorization[=: ]+bearer[ ]+)[^ ]+", r"\1[redacted]", text)
+        text = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[redacted-api-key]", text)
+        entry = f"{type(current).__name__}: {text}"
+        if entry not in parts:
+            parts.append(entry)
+        current = current.__cause__ or current.__context__
+    return " <- ".join(parts)[:max_chars]
+
+
+def resolve_ssl_verification(base_url, configured='auto'):
+    """Resolve TLS verification without weakening non-OpenAI endpoints."""
+    if isinstance(configured, str) and configured.strip().lower() == 'auto':
+        hostname = (urlsplit(str(base_url or '')).hostname or '').lower()
+        return hostname not in PUBLIC_OPENAI_API_HOSTS
+    return configured
 
 
 def create_client(api_key, base_url, options=None):
@@ -13,7 +52,9 @@ def create_client(api_key, base_url, options=None):
     return OpenAI(
         api_key=api_key, **({'base_url': base_url} if base_url else {}),
         timeout=options.get('timeout', 120), max_retries=options.get('max_retries', 2),
-        http_client=DefaultHttpxClient(verify=options.get('verify_ssl', True)),
+        http_client=DefaultHttpxClient(
+            verify=resolve_ssl_verification(base_url, options.get('verify_ssl', 'auto'))
+        ),
     )
 
 

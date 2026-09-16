@@ -7,6 +7,7 @@ service/api.py (persisted events, queued input, cancellable).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from dotenv import load_dotenv
 import yaml
 
 from agent.execution import RunCancelled, BudgetExhausted, EXECUTION_POLICY, workspace_lock
+from agent.llm import safe_endpoint, safe_exception_summary
 from agent.work_queue import WorkQueue
 from agent.events import EventEmitter, EventSink
 from agent.generic_agent import GenericAgent
@@ -34,6 +36,7 @@ MAX_PLAN_CONTEXT_CHARS = 12_000
 
 WaitForInput = Callable[[str], str]
 IsCancelled = Callable[[], bool]
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -235,8 +238,17 @@ class AgentRunner:
             emitter.emit("run.cancelled", {})
             return RunResult(run_id=run_id, session_id=session.id, status="cancelled")
         except Exception as exc:
-            emitter.emit("run.failed", {"error": str(exc)})
-            return RunResult(run_id=run_id, session_id=session.id, status="failed", error=str(exc))
+            error = safe_exception_summary(exc)
+            logger.exception(
+                "Agent run failed run_id=%s session_id=%s endpoint=%s model=%s error=%s",
+                run_id,
+                session.id,
+                safe_endpoint(orchestrator_config.get("base_url")),
+                orchestrator_config.get("model", "unconfigured"),
+                error,
+            )
+            emitter.emit("run.failed", {"error": error})
+            return RunResult(run_id=run_id, session_id=session.id, status="failed", error=error)
 
         emitter.emit("run.completed", {})
         return RunResult(

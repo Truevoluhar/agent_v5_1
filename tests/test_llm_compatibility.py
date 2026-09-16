@@ -10,12 +10,43 @@ from openai import OpenAI
 
 from agent.context_guard import ContextLimits, ContextWindowGuard
 from agent.generic_agent import GenericAgent
-from agent.llm import create_tool_response, generation_options, items_to_chat
+from agent.llm import (
+    create_tool_response,
+    generation_options,
+    items_to_chat,
+    resolve_ssl_verification,
+    safe_endpoint,
+    safe_exception_summary,
+)
 from agent.messages import normalize_chat_messages
 from agent.orchestrator_agent import OrchestratorAgent, create_orchestrator_response
 
 
 class CompatibilityTests(unittest.TestCase):
+    def test_tls_auto_mode_only_bypasses_public_openai(self):
+        self.assertFalse(resolve_ssl_verification('https://api.openai.com/v1', 'auto'))
+        self.assertTrue(resolve_ssl_verification('https://vllm.internal.example/v1', 'auto'))
+        self.assertTrue(resolve_ssl_verification('https://api.openai.com.evil.example/v1', 'auto'))
+        self.assertTrue(resolve_ssl_verification('http://vllm:8000/v1', 'auto'))
+        self.assertFalse(resolve_ssl_verification('https://vllm.internal/v1', False))
+        self.assertEqual(resolve_ssl_verification('https://vllm.internal/v1', '/ca/internal.pem'),
+                         '/ca/internal.pem')
+
+    def test_connection_error_summary_includes_root_cause_and_redacts_keys(self):
+        try:
+            try:
+                raise OSError("DNS failed while using sk-secretvalue")
+            except OSError as cause:
+                raise RuntimeError("Connection error.") from cause
+        except RuntimeError as exc:
+            summary = safe_exception_summary(exc)
+
+        self.assertIn("RuntimeError: Connection error.", summary)
+        self.assertIn("OSError: DNS failed", summary)
+        self.assertNotIn("sk-secretvalue", summary)
+        self.assertEqual(safe_endpoint("https://user:pass@example.com:8443/v1?q=x"),
+                         "https://example.com:8443")
+
     def test_single_system_message_preserves_tool_protocol(self):
         messages = [{'role': 'system', 'content': 'base'},
                     {'role': 'user', 'content': 'task'},

@@ -3,7 +3,9 @@ llm:
   api_mode: chat_completions
   reasoning_effort: null
   timeout: 120
-  verify_ssl: true
+  # auto disables verification only for the exact public OpenAI API hostname.
+  # Internal vLLM and every other endpoint keep certificate verification enabled.
+  verify_ssl: auto
   extra_body: {}
 
 agents_resources: resources/agents

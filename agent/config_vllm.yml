@@ -3,8 +3,8 @@ llm:
   api_mode: chat_completions
   reasoning_effort: null
   timeout: 120
-  # Preserve the existing internal TLS setting; a CA-bundle path is also supported.
-  verify_ssl: false
+  # Internal vLLM keeps certificate verification enabled.
+  verify_ssl: true
   extra_body: {}
 
 agents_resources: resources/agents
