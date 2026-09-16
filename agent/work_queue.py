@@ -106,6 +106,14 @@ class WorkQueue:
                 return None
             return dict(db.execute('SELECT * FROM tasks WHERE id=?', (row['id'],)).fetchone())
 
+    def active_task(self):
+        """Return the item currently owned by a worker, if any."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT id,title,source,attempts,cursor FROM tasks WHERE status='running' ORDER BY id LIMIT 1"
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def read(self, task_id, max_chars=4000):
         if not 4 <= max_chars <= 12000:
             raise ValueError('max_chars must be between 4 and 12000')

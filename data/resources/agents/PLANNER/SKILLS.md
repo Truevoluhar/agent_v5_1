@@ -17,6 +17,13 @@ Check relevant:
 
 Do not modify files during inspection.
 
+## `durable_planning_work`
+
+Claim the delegated queue item before using `run_shell`. The shell is unavailable
+until `work_queue(action='next')` has created a running item. When planning is
+finished, persist the plan and complete that same queue item with concise,
+checkable evidence. A chat response is never a substitute for queue completion.
+
 ## `extract_requirements`
 
 Convert the request into traceable requirements.
@@ -49,6 +56,8 @@ The plan must include:
 * final acceptance checklist.
 
 Preserve existing IDs and execution history.
+The active plan belongs only to the current session; an archived plan is history,
+not instructions for a new request.
 Update the single active `PLAN.md` snapshot; never append a second complete plan beneath the current one.
 Prefer targeted section replacement for frequent status updates.
 When the file grows too large, compress stale evidence/change history into concise summaries and keep active steps first-class.

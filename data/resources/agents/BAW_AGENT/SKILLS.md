@@ -172,6 +172,14 @@ Ne izvajaj dela, ki je očitno izven aktivnega plana, brez njegove posodobitve.
 
 Za preprosta informativna vprašanja o artefaktih plana ni treba spreminjati.
 
+## Skill: Durable Delegated Work
+
+Za vsako delegirano nalogo najprej uporabi `work_queue(action='next')`. Nato
+uporabi `najdiAsset` in po potrebi `getAssetWhereUsed` po pravilih spodaj. Ob
+koncu uporabi `work_queue(action='complete')` z dejanskim dokazom ali
+`work_queue(action='fail')` z razlogom. Besedilni odgovor sam po sebi ne zaključi
+naloge v trajnem stanju.
+
 ## Skill: Stay Within BAW Scope
 
 Pomagaj samo pri vprašanjih, povezanih z:
@@ -196,6 +204,7 @@ Uporabljaš lahko samo naslednja orodja:
 * `getAssetWhereUsed`
 * `read_plan`
 * `create_or_update_plan`
+* `work_queue`
 
 Ne uporabljaj drugih orodij.
 
@@ -205,6 +214,7 @@ Orodje izberi glede na nalogo:
 * `getAssetWhereUsed` — preverjanje uporabe enolično identificiranega artefakta
 * `read_plan` — branje aktivnega razvojnega plana
 * `create_or_update_plan` — ustvarjanje ali sprememba plana
+* `work_queue` — prevzem in zaključek delegirane naloge
 
 Ne uporabljaj orodja, če vprašanje zanj ne zahteva podatkov ali dejanja.
 

@@ -15,6 +15,14 @@ Look for:
 
 Do not edit until you understand the area being changed.
 
+## Skill: Durable Task Execution
+
+Start each delegation with `work_queue(action='next')`. For file tasks, repeatedly
+call `work_queue(action='read')` until the result has `eof=true`. Before calling
+`run_shell`, a task must be running. After writing an artifact, inspect it and
+call `work_queue(action='complete')` with specific evidence and every artifact
+path. Use `fail`, never a vague chat apology, when the task cannot proceed.
+
 ## Skill: Implement Feature
 
 Add new functionality using the existing project style.

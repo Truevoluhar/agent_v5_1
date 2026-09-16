@@ -51,7 +51,8 @@ such as supported chat-template settings, can be supplied through `extra_body`.
 `verify_ssl: auto` disables certificate verification only when the base URL's exact
 hostname is `api.openai.com`. Internal vLLM and every other hostname keep
 verification enabled. Explicit `true` and `false` values remain supported, and a
-CA-bundle path can be used for internal TLS. The bundled vLLM profile uses `true`.
+CA-bundle path can be used for internal TLS through `llm.ca_bundle` or the
+`VLLM_CA_BUNDLE` environment variable. The bundled vLLM profile uses `true`.
 
 `api_mode: responses` remains available for workers on servers that support it.
 The worker preserves stateless tool history and encrypted reasoning on that path.

@@ -11,6 +11,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 from dotenv import load_dotenv
@@ -32,6 +33,7 @@ from agent.user_storage import user_storage_paths
 AGENT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = str(AGENT_ROOT / "config.yml")
 DEFAULT_PLAN_FILENAME = "PLAN.md"
+PLAN_OWNER_FILENAME = ".agent/active-plan.json"
 MAX_PLAN_CONTEXT_CHARS = 12_000
 
 WaitForInput = Callable[[str], str]
@@ -59,10 +61,37 @@ class RunResult:
     error: Optional[str] = None
 
 
-def _read_active_plan_context(workspace_path: str, filename: str = DEFAULT_PLAN_FILENAME) -> tuple[str | None, dict]:
+def _prepare_plan_for_new_session(workspace_path: str, session_id: str) -> dict:
+    """Give a new session a fresh active plan without discarding the previous one."""
+    workspace = Path(workspace_path)
+    plan_path = workspace / DEFAULT_PLAN_FILENAME
+    owner_path = workspace / PLAN_OWNER_FILENAME
+    archived_to = None
+    if plan_path.exists():
+        archive_dir = workspace / "plan" / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        archived_to = archive_dir / f"PLAN_{timestamp}_{session_id[:8]}_previous-session.md"
+        plan_path.replace(archived_to)
+    owner_path.parent.mkdir(parents=True, exist_ok=True)
+    owner_path.write_text(json.dumps({"session_id": session_id, "state": "awaiting_plan"}), encoding="utf-8")
+    return {"archived_to": str(archived_to) if archived_to else None, "owner": str(owner_path)}
+
+
+def _read_active_plan_context(workspace_path: str, session_id: str | None = None,
+                              filename: str = DEFAULT_PLAN_FILENAME) -> tuple[str | None, dict]:
     plan_path = Path(workspace_path) / filename
     if not plan_path.exists():
         return None, {"exists": False, "path": str(plan_path)}
+
+    owner_path = Path(workspace_path) / PLAN_OWNER_FILENAME
+    if session_id and owner_path.exists():
+        try:
+            owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            owner = {}
+        if owner.get("session_id") != session_id:
+            return None, {"exists": True, "path": str(plan_path), "owned_by_other_session": True}
 
     content = plan_path.read_text(encoding="utf-8")
     metadata = {"exists": True, "path": str(plan_path), "chars": len(content), "truncated": False}
@@ -159,6 +188,10 @@ class AgentRunner:
         )
         if session.is_new:
             session.set_name(self._generate_session_name(request.prompt))
+            plan_reset = _prepare_plan_for_new_session(agent_workspace, session.id)
+            if plan_reset["archived_to"]:
+                logger.info("Archived prior active plan for new session session_id=%s archive=%s",
+                            session.id, plan_reset["archived_to"])
 
         run_id = request.run_id or session.id
         emitter = EventEmitter(run_id=run_id, session_id=session.id, sink=emit)
@@ -317,7 +350,7 @@ class AgentRunner:
                     max_chars=max(600, orchestrator_context_budget // 6),
                 )
 
-            plan_text, _ = _read_active_plan_context(agent_workspace)
+            plan_text, _ = _read_active_plan_context(agent_workspace, session.id)
 
             orchestrator_messages = session.get_bounded_context(
                 max_recent_messages=12,
@@ -381,6 +414,20 @@ class AgentRunner:
                 if delegated_agent is not None:
                     emitter.emit("agent.delegated", {"agent": delegated_agent.name})
 
+                    # Every delegation has a durable unit of work. This prevents a
+                    # worker from treating exploratory shell output as completion.
+                    queue_before = queue.summary()
+                    if not queue_before["remaining"]:
+                        created = queue.add(
+                            f"{delegated_agent.name}: {orchestrator_response.description}"
+                        )
+                        queue_before = queue.summary()
+                        logger.info("Created delegated work item run_session=%s task_id=%s agent=%s",
+                                    session.id, created["id"], delegated_agent.name)
+
+                    worker_context = (EXECUTION_POLICY + "\nCurrent objective: " + str(objective)
+                                      + "\nDurable work status: " + json.dumps(queue_before))
+
                     agent_messages = session.get_bounded_context(
                         max_recent_messages=12,
                         max_context_chars=delegated_context_budget,
@@ -398,7 +445,12 @@ class AgentRunner:
                             },
                         )
 
-                    agent_messages.append({"role": "user", "content": durable_context + "\nDelegated task: " + orchestrator_response.description})
+                    agent_messages.append({"role": "user", "content": (
+                        worker_context + "\nDelegated task: " + orchestrator_response.description
+                        + "\nYou must call work_queue(action='next') before run_shell. "
+                        "Complete the claimed item with evidence and artifact paths, or mark it failed with a reason. "
+                        "Do not report this delegation as complete until the queue records it."
+                    )})
                     try:
                         delegated_agent.chat(
                             agent_messages,
@@ -411,6 +463,17 @@ class AgentRunner:
                         emitter.emit("agent.yielded", {"agent": delegated_agent.name, "reason": "iteration_budget"})
                         session.add_message({"role": "assistant", "content":
                             "Worker batch ended. Resume from work_queue and archived tool results; work is not yet complete."})
+                    queue_after = queue.summary()
+                    emitter.emit("agent.batch.completed", {
+                        "agent": delegated_agent.name,
+                        "remaining": queue_after["remaining"],
+                        "counts": queue_after["counts"],
+                    })
+                    if queue_after["remaining"]:
+                        session.add_message({"role": "system", "content": (
+                            "The delegated worker returned, but durable work remains. "
+                            "Do not treat its narrative as completion; delegate the queue's next item or resolve its failure."
+                        )})
 
 
             if orchestrator_response.action == "ask_user":

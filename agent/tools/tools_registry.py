@@ -1,4 +1,5 @@
 from agent.execution import RunCancelled
+from agent.work_queue import WorkQueue
 from dataclasses import dataclass
 from typing import Optional, Callable
 
@@ -53,6 +54,17 @@ def execute_registered_tool(
             executor_kwargs["scope"] = scope
 
         if tool_name == "run_shell":
+            active_task = WorkQueue(workspace, scope).active_task()
+            if active_task is None:
+                return {
+                    "ok": False,
+                    "output": None,
+                    "error": (
+                        "Claim the delegated work first: call work_queue with action='next'. "
+                        "Shell commands are tied to a running durable task so progress can be resumed and verified."
+                    ),
+                    "metadata": {},
+                }
             executor_kwargs["is_cancelled"] = is_cancelled
 
         result = tool.executor(workspace=workspace, **executor_kwargs)

@@ -5,6 +5,12 @@
 Inspect the user goal, current plan, completed steps, artifacts, and latest results. Choose exactly one next action that moves the task toward completion.
 
 Use `finish` only when the goal is complete.
+If the durable work queue has remaining items, delegate its next item or resolve
+its failure. Do not infer completion from a worker's prose.
+For a new session with no active plan, delegate to `PLANNER`. For an existing
+session, keep delegating the queue's current item until it is completed or has a
+recorded failure. The runtime creates queue items automatically; do not ask a
+worker to invent a parallel task list in chat.
 
 ## Skill: Create Plan
 
@@ -48,7 +54,8 @@ Examples:
 * Use `verifier` for reviewing failures, checking correctness, and deciding whether issues are real bugs or bad tests.
 
 Delegated tasks must be specific and include all needed context.
-If no active `PLAN.md` exists, delegate to `PLANNER` first.
+If no active `PLAN.md` exists, delegate to `PLANNER` first. Include one bounded,
+actionable step in each delegation; do not delegate a whole project as one task.
 
 ## Skill: Call Tool
 

@@ -1,6 +1,7 @@
 """Provider-neutral request formatting for OpenAI and OpenAI-compatible servers."""
 import os
 import re
+import ssl
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -52,14 +53,26 @@ def create_client(api_key, base_url, options=None):
         raise ValueError("Configured LLM API key is missing; check the api_key environment variable named in config")
     verify = resolve_ssl_verification(base_url, options.get('verify_ssl', 'auto'))
     if verify is True:
-        verify = options.get('ca_bundle') or os.getenv('VLLM_CA_BUNDLE') or os.getenv('SSL_CERT_FILE') or verify
+        ca_bundle = options.get('ca_bundle') or os.getenv('VLLM_CA_BUNDLE')
+        if ca_bundle:
+            if not os.path.isfile(ca_bundle):
+                raise ValueError(f"Configured internal CA bundle does not exist: {ca_bundle}")
+            verify = ca_bundle
     client_cert = options.get('client_cert') or os.getenv('CLIENT_CERT')
     client_key = options.get('client_key') or os.getenv('CLIENT_KEY')
     http_options = {'verify': verify}
-    if client_cert or client_key:
+    is_public_openai = (urlsplit(str(base_url or '')).hostname or '').lower() in PUBLIC_OPENAI_API_HOSTS
+    if (client_cert or client_key) and not is_public_openai:
         if not client_cert or not client_key:
             raise ValueError("Both CLIENT_CERT and CLIENT_KEY are required for client-certificate authentication")
-        http_options['cert'] = (client_cert, client_key)
+        # httpx does not allow a CA path and cert= together. Build one context
+        # so internal vLLM can use both a private CA and mutual TLS.
+        context = ssl.create_default_context(cafile=verify if isinstance(verify, str) else None)
+        if verify is False:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        context.load_cert_chain(client_cert, client_key)
+        http_options['verify'] = context
     return OpenAI(
         api_key=api_key, **({'base_url': base_url} if base_url else {}),
         timeout=options.get('timeout', 120), max_retries=options.get('max_retries', 2),

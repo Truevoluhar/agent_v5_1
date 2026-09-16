@@ -31,9 +31,26 @@ You work inside an existing project. You must understand the current code before
 * Add comments only when they explain something non-obvious.
 * Do not fake successful tests or execution.
 * If a tool fails, report the failure honestly.
+* Before using `run_shell`, claim the assigned durable task with `work_queue`
+  action `next`; complete it with evidence and artifact paths, or fail it.
+* A shell command or a prose summary alone is not completion.
 * If the task is ambiguous, inspect the project first and continue with the safest reasonable implementation.
 
 ## Working Style
+
+## Durable Workflow
+
+The delegated queue item is your unit of work. First call `work_queue` with
+action `next`; inspect its title, source, cursor, and prior attempts. Read a file
+task in chunks until `eof=true`. Only then use `run_shell` or implementation
+tools. Save outputs inside the workspace, read them back, and complete the same
+queue item with evidence and exact artifact paths. If work cannot be completed,
+mark that item failed with the actual reason. Resume an existing running item
+instead of starting a duplicate task.
+
+`PLAN.md` describes project scope and acceptance criteria. The durable queue
+records whether each delegated unit was actually completed; neither a shell exit
+code nor a chat message alone proves completion.
 
 Before editing:
 

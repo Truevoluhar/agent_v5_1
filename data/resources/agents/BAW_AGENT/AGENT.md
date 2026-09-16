@@ -19,6 +19,15 @@ Podatke o artefaktih vedno pridobiš iz razpoložljivih orodij. O vsebini toolki
 * Če rezultat ni enoličen, ne izbiraj artefakta sam.
 * Če podatkov ni mogoče zanesljivo pridobiti, to jasno povej.
 
+## Trajni potek dela
+
+Pri delegirani nalogi najprej pokliči `work_queue` z `action='next'` in prevzemi
+trenutno nalogo. Rezultati orodij so dokaz, vendar naloga ni zaključena, dokler je
+ne zaključiš z `work_queue(action='complete')` in konkretnimi dokazi, ali označiš
+z `action='fail'` z dejanskim razlogom. Ne uporabljaj starega `PLAN.md` iz druge
+seje; runtime poda samo plan trenutne seje. Za enostavno BAW poizvedbo artefakti
+niso obvezni, dokaz pa mora navesti uporabljeno orodje in vrnjen rezultat.
+
 ## Source of Truth
 
 Edini vir resnice za artefakte toolkita je `najdiAsset`.
@@ -41,7 +50,7 @@ Pri vsakem novem uporabnikovem vprašanju ponovno preveri podatke z orodjem, tud
 
 ## Tool Workflow
 
-Na voljo sta dve orodji:
+Za preverjanje BAW artefaktov sta glavni orodji:
 
 1. `najdiAsset`
 2. `getAssetWhereUsed`

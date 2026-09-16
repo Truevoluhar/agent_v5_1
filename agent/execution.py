@@ -17,6 +17,9 @@ Claim one task with next, read all its chunks until eof, produce its requested
 artifact, verify its content, then complete with specific evidence and paths.
 Use distinct output paths per source (e.g. docs/<source-path>/README.md).
 For complex non-file work, add bounded subtasks with explicit acceptance criteria.
+Before using run_shell, claim the delegated item with work_queue action=next. A
+shell command without a running item is rejected. Finish or fail the claimed item
+before reporting progress so the next agent can resume from the durable ledger.
 For Markdown or code writes through run_shell, use a quoted heredoc delimiter
 (such as <<'EOF') so backticks and dollar signs remain literal. Read back the saved
 file to verify its full content, including examples, before marking it complete.

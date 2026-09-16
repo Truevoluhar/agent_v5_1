@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from agent.work_queue import WorkQueue
+from agent.tools.tools_registry import execute_registered_tool
 
 
 class WorkQueueTests(unittest.TestCase):
@@ -92,6 +93,26 @@ class WorkQueueTests(unittest.TestCase):
         self.assertIsNone(self.queue.claim())
         self.assertEqual(self.queue.summary()['remaining'], 1)
         self.assertEqual(WorkQueue(self.root, 'other-session').summary()['total'], 0)
+
+    def test_shell_requires_a_claimed_durable_task(self):
+        refused = execute_registered_tool(
+            workspace=str(self.root), tool_name='run_shell',
+            tool_input={'command': 'printf blocked > blocked.txt', 'cwd': '.', 'timeout': 5, 'background': False},
+            scope='session',
+        )
+        self.assertFalse(refused['ok'])
+        self.assertFalse((self.root / 'blocked.txt').exists())
+        self.assertIn("work_queue", refused['error'])
+
+        self.queue.add('Create the evidence file')
+        self.queue.claim()
+        result = execute_registered_tool(
+            workspace=str(self.root), tool_name='run_shell',
+            tool_input={'command': 'printf recorded > evidence.txt', 'cwd': '.', 'timeout': 5, 'background': False},
+            scope='session',
+        )
+        self.assertTrue(result['ok'])
+        self.assertEqual((self.root / 'evidence.txt').read_text(), 'recorded')
 
     def test_paths_cannot_escape_and_unicode_chunk_boundaries(self):
         with self.assertRaises(ValueError):

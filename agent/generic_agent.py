@@ -271,7 +271,16 @@ class GenericAgent:
                             is_cancelled=is_cancelled,
                         )
                         if emit is not None:
-                            emit("tool.completed", {"agent": self.name, "tool": tool_name, "ok": bool(tool_result.get("ok", False))})
+                            metadata = tool_result.get("metadata") or {}
+                            emit("tool.completed", {
+                                "agent": self.name,
+                                "tool": tool_name,
+                                "ok": bool(tool_result.get("ok", False)),
+                                "cwd": metadata.get("cwd"),
+                                "exit_code": metadata.get("exit_code"),
+                                "log_file": metadata.get("log_file"),
+                                "error": tool_result.get("error"),
+                            })
                     except RunCancelled:
                         raise
                     except Exception as exc:
