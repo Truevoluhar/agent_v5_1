@@ -58,6 +58,24 @@ class WorkspaceFsToolTests(unittest.TestCase):
             self.assertEqual(read.output, "hello")
             self.assertEqual(read.metadata["next_offset"], 5)
 
+    def test_read_text_clamps_oversized_max_chars(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sample = root / "docs.txt"
+            sample.write_text("abc", encoding="utf-8")
+
+            read = workspace_fs_executor(
+                workspace=root,
+                action="read_text",
+                path="docs.txt",
+                max_chars=50000,
+                offset=0,
+            )
+            self.assertTrue(read.ok)
+            self.assertEqual(read.output, "abc")
+            self.assertEqual(read.metadata["requested_max_chars"], 50000)
+            self.assertEqual(read.metadata["applied_max_chars"], 12000)
+
 
 if __name__ == "__main__":
     unittest.main()

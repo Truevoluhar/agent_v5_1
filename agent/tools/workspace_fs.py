@@ -36,8 +36,8 @@ def _list_tree(workspace: Path, root: str, pattern: str, max_entries: int) -> To
 
 
 def _read_text(workspace: Path, path: str, max_chars: int, offset: int) -> ToolResult:
-    if not 1 <= max_chars <= 12000:
-        return ToolResult(ok=False, output=None, error="max_chars must be between 1 and 12000", metadata={})
+    requested_max_chars = int(max_chars)
+    max_chars = max(1, min(requested_max_chars, 120000))
     target = workspace_file(workspace, path)
     if not target.is_file():
         return ToolResult(ok=False, output=None, error=f"File not found: {target}", metadata={})
@@ -53,6 +53,8 @@ def _read_text(workspace: Path, path: str, max_chars: int, offset: int) -> ToolR
         output=chunk,
         metadata={
             "path": str(target),
+            "requested_max_chars": requested_max_chars,
+            "applied_max_chars": max_chars,
             "offset": max(0, offset),
             "next_offset": next_offset,
             "eof": next_offset >= len(text),

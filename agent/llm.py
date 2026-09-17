@@ -16,7 +16,7 @@ PUBLIC_OPENAI_API_HOSTS = frozenset({'api.openai.com'})
 def safe_endpoint(base_url):
     """Return only scheme and host, never credentials, paths, or query data."""
     parsed = urlsplit(str(base_url or ""))
-    if not parsed.scheme or not parsed.hostname:
+    if not parsed.scheme or not parsed.hostname: 
         return "unconfigured"
     port = f":{parsed.port}" if parsed.port else ""
     return f"{parsed.scheme}://{parsed.hostname}{port}"

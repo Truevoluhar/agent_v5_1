@@ -241,6 +241,32 @@ class TaskBoardTests(unittest.TestCase):
         self.assertTrue(submitted["ok"])
         self.assertEqual(self.board.get_task(task_id=task["id"])["status"], "reported")
 
+    def test_task_board_current_falls_back_to_requested_task(self):
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "TASK-FALLBACK",
+                    "title": "Fallback",
+                    "description": "Inspect specific task",
+                    "task_type": "analysis",
+                    "priority": 1,
+                }
+            ]
+        )
+        task = self.board.get_task(task_key="TASK-FALLBACK")
+        current = execute_registered_tool(
+            workspace=str(self.root),
+            tool_name="task_board",
+            tool_input={
+                "action": "current",
+                "task_id": task["id"],
+                "task_key": "TASK-FALLBACK",
+            },
+            scope="session",
+        )
+        self.assertTrue(current["ok"])
+        self.assertIn("TASK-FALLBACK", current["output"])
+
     def test_inventory_and_read_source_support_large_file_sets(self):
         project = self.root / "project"
         project.mkdir()

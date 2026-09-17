@@ -32,7 +32,7 @@ def task_board_executor(
     if action == "status":
         result = board.summary(limit=int(limit))
     elif action == "current":
-        result = board.active_task() or {}
+        result = board.active_task() or board.get_task(task_id=task_id, task_key=task_key) or {}
     elif action == "next":
         result = board.next_ready() or {}
     elif action == "get":
