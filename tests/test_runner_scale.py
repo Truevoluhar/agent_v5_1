@@ -3,7 +3,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from pydantic import ValidationError
+
 from agent.execution import BudgetExhausted
+from agent.orchestrator_agent import create_orchestrator_response
 from agent.runner import AgentRunner
 from agent.work_queue import TaskBoard
 
@@ -237,6 +240,52 @@ class RunnerScaleTests(unittest.TestCase):
             self.assertIn("extracted_documents/ADGZ__ADGZ.txt", seen["instructions"])
             self.assertIn("README.md follows TEMPLATE_README.md format exactly", seen["instructions"])
             self.assertNotEqual(seen["instructions"], "Delegate next task")
+
+    def test_invalid_orchestrator_delegation_falls_back_to_first_ready_task(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            board = TaskBoard(workspace, "test")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "TASK-A",
+                        "title": "First",
+                        "description": "Do the first task",
+                        "task_type": "implementation",
+                        "priority": 1,
+                        "suggested_agent": "WORKER",
+                    }
+                ]
+            )
+            response_model = create_orchestrator_response(["WORKER"])
+            caught = None
+
+            def bad_decision(messages):
+                nonlocal caught
+                try:
+                    response_model(action="delegate_to_agent", description="broken")
+                except ValidationError as exc:
+                    caught = exc
+                    raise exc
+                raise AssertionError("Expected ValidationError")
+
+            def chat(*args, **kwargs):
+                task = board.get_task(task_key="TASK-A")
+                board.submit(task["id"], summary="done", evidence="completed", artifacts=[])
+
+            worker = SimpleNamespace(name="WORKER", chat=chat)
+            decisions = [SimpleNamespace(action="finish", description="done", task_key=None, agent_name=None)]
+            orchestrator = SimpleNamespace(
+                plan_tasks=lambda messages: SimpleNamespace(summary="unused", tasks=[]),
+                decide_next_action=bad_decision,
+                review_task=lambda messages: (
+                    SimpleNamespace(outcome="accept", validation_notes="accepted", new_tasks=[])
+                    if '"status": "reported"' in messages[-1]["content"]
+                    else decisions.pop(0)
+                ),
+            )
+            self.assertIsNone(self.run_loop(workspace, orchestrator, [worker], steps=3))
+            self.assertIsNotNone(caught)
+            self.assertEqual(board.get_task(task_key="TASK-A")["status"], "validated")
 
     def test_blocked_task_review_reopens_instead_of_crashing_on_accept(self):
         with tempfile.TemporaryDirectory() as workspace:

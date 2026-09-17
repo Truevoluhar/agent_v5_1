@@ -37,7 +37,7 @@ def _list_tree(workspace: Path, root: str, pattern: str, max_entries: int) -> To
 
 def _read_text(workspace: Path, path: str, max_chars: int, offset: int) -> ToolResult:
     requested_max_chars = int(max_chars)
-    max_chars = max(1, min(requested_max_chars, 120000))
+    max_chars = max(1, min(requested_max_chars, 12000))
     target = workspace_file(workspace, path)
     if not target.is_file():
         return ToolResult(ok=False, output=None, error=f"File not found: {target}", metadata={})

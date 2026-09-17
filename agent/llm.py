@@ -75,7 +75,7 @@ def create_client(api_key, base_url, options=None):
         http_options['verify'] = context
     return OpenAI(
         api_key=api_key, **({'base_url': base_url} if base_url else {}),
-        timeout=options.get('timeout', 120), max_retries=options.get('max_retries', 2),
+        timeout=options.get('timeout', 3000), max_retries=options.get('max_retries', 2),
         http_client=DefaultHttpxClient(**http_options),
     )
 

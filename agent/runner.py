@@ -7,6 +7,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from dotenv import load_dotenv
@@ -107,6 +108,31 @@ def _recommended_step_budget(base_max_steps: int, board_summary: dict[str, Any])
     # A successful task typically needs one delegation step and one review step.
     recommended = (remaining * 2) + review_queue + active + 4
     return max(base_max_steps, recommended)
+
+
+def _fallback_orchestrator_decision(
+    *,
+    ready_tasks: list[dict[str, Any]],
+    agents: list[GenericAgent],
+    error: Exception,
+) -> SimpleNamespace:
+    if not ready_tasks:
+        raise error
+    task = ready_tasks[0]
+    preferred_agent = _find_agent_by_name(agents, str(task.get("suggested_agent") or ""))
+    delegated_agent = preferred_agent or (agents[0] if agents else None)
+    if delegated_agent is None:
+        raise error
+    description = (
+        "Fallback delegation because the orchestrator returned an invalid decision. "
+        f"Complete task {task['task_key']}: {task['title']}."
+    )
+    return SimpleNamespace(
+        action="delegate_to_agent",
+        description=description,
+        task_key=task["task_key"],
+        agent_name=delegated_agent.name,
+    )
 
 
 def _finalize_completed_work(
@@ -606,7 +632,24 @@ class AgentRunner:
                     }
                 )
                 emitter.emit("orchestrator.started", {"step": step, "mode": "dispatch"})
-                decision = orchestrator_agent.decide_next_action(orchestration_messages)
+                try:
+                    decision = orchestrator_agent.decide_next_action(orchestration_messages)
+                except Exception as exc:
+                    decision = _fallback_orchestrator_decision(
+                        ready_tasks=ready_tasks,
+                        agents=agents,
+                        error=exc,
+                    )
+                    session.add_message(
+                        {
+                            "role": "assistant",
+                            "content": (
+                                "Orchestrator returned an invalid dispatch decision, so the runtime selected "
+                                f"{decision.task_key} for {decision.agent_name}. "
+                                f"Reason: {safe_exception_summary(exc, max_chars=300)}"
+                            ),
+                        }
+                    )
                 emitter.emit(
                     "orchestrator.decision",
                     {"action": decision.action, "description": decision.description, "task_key": decision.task_key},
