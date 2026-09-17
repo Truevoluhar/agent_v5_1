@@ -8,17 +8,11 @@ class BudgetExhausted(Exception):
 
 
 EXECUTION_POLICY = '''
-For large or multi-file tasks, use work_queue to inventory the complete requested
-scope before processing it. Keep PLAN.md concise: objective, acceptance criteria,
-strategy, and unresolved issues; keep per-item status in the durable queue.
-Choose accurate file globs and record excluded/generated/binary files in the plan.
-For a ZIP, inspect and safely extract it into its own directory before inventory.
-Claim one task with next, read all its chunks until eof, produce its requested
-artifact, verify its content, then complete with specific evidence and paths.
-Use distinct output paths per source (e.g. docs/<source-path>/README.md).
-For complex non-file work, add bounded subtasks with explicit acceptance criteria.
-Before using run_shell, claim the delegated item with work_queue action=next. A
-shell command without a running item is rejected. Finish or fail the claimed item
+Use task_board as the durable source of truth for delegated work. Inspect the
+current delegated task before making changes, keep the work scoped to that task,
+and submit evidence back through task_board when the task is complete.
+Before using run_shell, ensure a delegated task is already in progress. A shell
+command without a running task is rejected. Finish or block the current task
 before reporting progress so the next agent can resume from the durable ledger.
 For Markdown or code writes through run_shell, use a quoted heredoc delimiter
 (such as <<'EOF') so backticks and dollar signs remain literal. Read back the saved
@@ -26,8 +20,8 @@ file to verify its full content, including examples, before marking it complete.
 Persist partial findings to workspace files before context fills. Tool transcripts
 are recoverable under .agent/tool-results. Never treat a truncated read as a full
 file inspection. Resume running work after interruptions; do not redo completed
-items. Mark failures with reasons, diagnose them, and refresh only when appropriate.
-Before finishing, verify queue coverage and artifacts and run relevant validation.
+items. Mark blockers honestly with reasons and concrete follow-up suggestions.
+Before finishing, verify validated artifacts and run relevant checks when possible.
 Existence and hashes prove coverage, not semantic correctness: review the results.
 Never claim unprocessed work is complete. Report limitations and remaining work.
 '''

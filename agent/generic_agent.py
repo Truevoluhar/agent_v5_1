@@ -3,7 +3,7 @@ import uuid
 from pathlib import Path
 
 from agent.execution import BudgetExhausted, RunCancelled, EXECUTION_POLICY
-from agent.work_queue import WorkQueue
+from agent.work_queue import TaskBoard
 from typing import Any, Callable, Union
 
 from openai import OpenAI
@@ -401,13 +401,13 @@ class GenericAgent:
         directory.mkdir(parents=True, exist_ok=True)
         archive = directory / ("context-" + uuid.uuid4().hex + ".json")
         archive.write_text(json.dumps([serializable(i) for i in items], default=str, ensure_ascii=False), encoding="utf-8")
-        state = WorkQueue(self.workspace_path, scope).summary()
+        state = TaskBoard(self.workspace_path, scope).summary()
         state["transcript"] = str(archive.relative_to(self.workspace_path))
         checkpoint = {
             "role": "user",
             "content": ("Continue the original task from this durable checkpoint. "
                         "Earlier tool rounds were archived in .agent/tool-results; "
-                        "read relevant logs and PLAN.md as needed. Do not repeat side effects.\n"
+                        "read relevant logs and task_board state as needed. Do not repeat side effects.\n"
                         + json.dumps(state, ensure_ascii=False)),
         }
         recent = [serializable(i) for i in items if

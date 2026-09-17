@@ -1,9 +1,4 @@
-"""Reusable, in-process agent execution loop.
-
-Extracted from the old agent/cli.py main() so it can be driven by multiple
-front ends: the CLI (blocking input()/print()), and the long-running
-service/api.py (persisted events, queued input, cancellable).
-"""
+"""Reusable, in-process agent execution loop."""
 from __future__ import annotations
 
 import json
@@ -11,30 +6,25 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+
 from dotenv import load_dotenv
-
-
 import yaml
 
-from agent.execution import RunCancelled, BudgetExhausted, EXECUTION_POLICY, workspace_lock
-from agent.llm import safe_endpoint, safe_exception_summary
-from agent.work_queue import WorkQueue
 from agent.events import EventEmitter, EventSink
+from agent.execution import BudgetExhausted, EXECUTION_POLICY, RunCancelled, workspace_lock
 from agent.generic_agent import GenericAgent
+from agent.llm import safe_endpoint, safe_exception_summary
 from agent.orchestrator_agent import OrchestratorAgent
 from agent.paths import DATA_ROOT
 from agent.response_agent import ResponseAgent
 from agent.session import Session
 from agent.user_storage import user_storage_paths
+from agent.work_queue import TaskBoard
 
 AGENT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = str(AGENT_ROOT / "config.yml")
-DEFAULT_PLAN_FILENAME = "PLAN.md"
-PLAN_OWNER_FILENAME = ".agent/active-plan.json"
-MAX_PLAN_CONTEXT_CHARS = 12_000
 
 WaitForInput = Callable[[str], str]
 IsCancelled = Callable[[], bool]
@@ -61,48 +51,6 @@ class RunResult:
     error: Optional[str] = None
 
 
-def _prepare_plan_for_new_session(workspace_path: str, session_id: str) -> dict:
-    """Give a new session a fresh active plan without discarding the previous one."""
-    workspace = Path(workspace_path)
-    plan_path = workspace / DEFAULT_PLAN_FILENAME
-    owner_path = workspace / PLAN_OWNER_FILENAME
-    archived_to = None
-    if plan_path.exists():
-        archive_dir = workspace / "plan" / "archive"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        archived_to = archive_dir / f"PLAN_{timestamp}_{session_id[:8]}_previous-session.md"
-        plan_path.replace(archived_to)
-    owner_path.parent.mkdir(parents=True, exist_ok=True)
-    owner_path.write_text(json.dumps({"session_id": session_id, "state": "awaiting_plan"}), encoding="utf-8")
-    return {"archived_to": str(archived_to) if archived_to else None, "owner": str(owner_path)}
-
-
-def _read_active_plan_context(workspace_path: str, session_id: str | None = None,
-                              filename: str = DEFAULT_PLAN_FILENAME) -> tuple[str | None, dict]:
-    plan_path = Path(workspace_path) / filename
-    if not plan_path.exists():
-        return None, {"exists": False, "path": str(plan_path)}
-
-    owner_path = Path(workspace_path) / PLAN_OWNER_FILENAME
-    if session_id and owner_path.exists():
-        try:
-            owner = json.loads(owner_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            owner = {}
-        if owner.get("session_id") != session_id:
-            return None, {"exists": True, "path": str(plan_path), "owned_by_other_session": True}
-
-    content = plan_path.read_text(encoding="utf-8")
-    metadata = {"exists": True, "path": str(plan_path), "chars": len(content), "truncated": False}
-
-    if len(content) > MAX_PLAN_CONTEXT_CHARS:
-        metadata["truncated"] = True
-        content = content[:MAX_PLAN_CONTEXT_CHARS] + "\n\n[TRUNCATED PLAN CONTEXT]"
-
-    return content, metadata
-
-
 def _find_agent_by_name(agents: list[GenericAgent], agent_name: str) -> GenericAgent | None:
     for agent in agents:
         if agent.name == agent_name:
@@ -110,9 +58,44 @@ def _find_agent_by_name(agents: list[GenericAgent], agent_name: str) -> GenericA
     return None
 
 
-def _planner_name(agents: list[GenericAgent]) -> str | None:
-    planner_agent = _find_agent_by_name(agents, "PLANNER")
-    return planner_agent.name if planner_agent is not None else None
+def _finalize_completed_work(
+    *,
+    board: TaskBoard,
+    response_agent: ResponseAgent | None,
+    session: Session,
+    response_context_budget: int,
+    response_schema_source: Any,
+    emitter: EventEmitter,
+    is_cancelled: IsCancelled,
+    completion_note: str,
+) -> tuple[bool, Any]:
+    coverage = board.verify()
+    emitter.emit("work.coverage", coverage)
+    if coverage["remaining"]:
+        return False, None
+
+    if response_agent is not None:
+        emitter.emit("response.started", {})
+        final_messages = session.get_bounded_context(
+            max_recent_messages=20,
+            max_context_chars=response_context_budget,
+        )
+        final_messages.append(
+            {
+                "role": "user",
+                "content": completion_note + "\n" + json.dumps(board.completion_report()),
+            }
+        )
+        final_response = response_agent.chat_structured(
+            messages=final_messages,
+            schema_source=response_schema_source,
+            session=session,
+        )
+        if is_cancelled():
+            raise RunCancelled()
+        return True, final_response
+
+    return True, None
 
 
 class AgentRunner:
@@ -173,12 +156,9 @@ class AgentRunner:
             else:
                 response_schema_source = str(DATA_ROOT / raw_schema)
 
-        # Workspace: honor the caller-provided workspace instead of always
-        # falling back to the global config value (previously --workspace was
-        # parsed but silently ignored).
         workspace_value = request.workspace or config["workspace"]
         agent_workspace = str(DATA_ROOT / workspace_value) if workspace_value else str(DATA_ROOT)
-        Path(f"{agent_workspace}/plan").mkdir(parents=True, exist_ok=True)
+        Path(agent_workspace).mkdir(parents=True, exist_ok=True)
 
         session = Session(
             id=request.session_id,
@@ -188,10 +168,6 @@ class AgentRunner:
         )
         if session.is_new:
             session.set_name(self._generate_session_name(request.prompt))
-            plan_reset = _prepare_plan_for_new_session(agent_workspace, session.id)
-            if plan_reset["archived_to"]:
-                logger.info("Archived prior active plan for new session session_id=%s archive=%s",
-                            session.id, plan_reset["archived_to"])
 
         run_id = request.run_id or session.id
         emitter = EventEmitter(run_id=run_id, session_id=session.id, sink=emit)
@@ -214,8 +190,6 @@ class AgentRunner:
                 )
             )
 
-        available_agents = [agent.name for agent in agents]
-
         orchestrator_agent = OrchestratorAgent(
             id="orchestrator_agent",
             name=orchestrator_config["name"],
@@ -225,7 +199,7 @@ class AgentRunner:
             api_key=os.getenv(orchestrator_config["api_key"]),
             resources_path=agent_resources,
             workspace_path=agent_workspace,
-            available_agents=available_agents,
+            available_agents=[agent.name for agent in agents],
             context_limits=context_limits,
             llm_options={**options, **orchestrator_config.get("llm", {})},
         )
@@ -284,23 +258,170 @@ class AgentRunner:
             return RunResult(run_id=run_id, session_id=session.id, status="failed", error=error)
 
         emitter.emit("run.completed", {})
-        return RunResult(
-            run_id=run_id, session_id=session.id, status="completed", final_response=final_response
-        )
-
+        return RunResult(run_id=run_id, session_id=session.id, status="completed", final_response=final_response)
 
     @staticmethod
     def _generate_session_name(prompt: str) -> str:
-        """Create a useful title without making an extra provider request.
-
-        Session naming is metadata and must not delay, consume tokens from, or
-        produce misleading connection warnings before the actual run starts.
-        """
         plain_text = re.sub(r"[`#*_>\[\]{}()]", " ", str(prompt or ""))
         words = plain_text.split()
         if not words:
             return "New chat"
         return " ".join(words[:8])[:120]
+
+    def _build_retrieval_context(self, session: Session, query: str, budget: int) -> str:
+        retrieval_limit = Session.suggest_retrieval_limit(
+            context_budget_chars=max(600, budget // 5),
+            min_limit=1,
+            max_limit=6,
+            chars_per_match=450,
+        )
+        return session.format_retrieval_context(
+            query=query,
+            limit=retrieval_limit,
+            max_chars=max(600, budget // 4),
+        )
+
+    def _ensure_tasks_planned(
+        self,
+        *,
+        board: TaskBoard,
+        session: Session,
+        objective: str,
+        orchestrator_agent: OrchestratorAgent,
+        emitter: EventEmitter,
+        context_budget: int,
+    ) -> None:
+        if board.has_tasks():
+            return
+
+        planning_messages = session.get_bounded_context(
+            max_recent_messages=12,
+            max_context_chars=context_budget,
+        )
+        retrieval_context = self._build_retrieval_context(session, objective, context_budget)
+        if retrieval_context:
+            planning_messages.insert(0, {"role": "system", "content": retrieval_context})
+        planning_messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Create the initial SQLite task board for this user request. "
+                    "Break the work into concrete tasks with dependencies, priorities, suggested agents, "
+                    "and acceptance criteria. Use all available agents where it helps. "
+                    "Current objective:\n" + objective
+                ),
+            }
+        )
+        emitter.emit("orchestrator.started", {"mode": "planning"})
+        plan = orchestrator_agent.plan_tasks(planning_messages)
+        planned_tasks = [task.model_dump(exclude_none=True) for task in plan.tasks]
+        if not planned_tasks:
+            planned_tasks = [
+                {
+                    "task_key": "TASK-PRIMARY",
+                    "title": "Complete the user request",
+                    "description": objective,
+                    "task_type": "implementation",
+                    "priority": 10,
+                    "acceptance_criteria": ["The user request is completed and evidenced on disk or in tool output."],
+                }
+            ]
+        created = board.add_tasks(planned_tasks, created_by=orchestrator_agent.name)
+        session.add_message(
+            {
+                "role": "assistant",
+                "content": (
+                    f"Orchestrator created {len(created)} durable tasks. "
+                    f"Planning summary: {plan.summary}"
+                ),
+            }
+        )
+        emitter.emit(
+            "orchestrator.decision",
+            {"action": "plan_tasks", "task_count": len(created), "description": plan.summary},
+        )
+
+    def _review_reported_task(
+        self,
+        *,
+        board: TaskBoard,
+        session: Session,
+        objective: str,
+        orchestrator_agent: OrchestratorAgent,
+        emitter: EventEmitter,
+        wait_for_input: WaitForInput,
+        is_cancelled: IsCancelled,
+        context_budget: int,
+    ) -> None:
+        review_task = board.list_tasks(statuses=["reported", "blocked"], limit=1)
+        if not review_task:
+            return
+        task = review_task[0]
+        review_messages = session.get_bounded_context(
+            max_recent_messages=12,
+            max_context_chars=context_budget,
+        )
+        review_messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Review this delegated task result and decide whether to accept it, "
+                    "return it for rework, cancel it, or ask the user.\n"
+                    + json.dumps(
+                        {
+                            "objective": objective,
+                            "task": task,
+                            "board_summary": board.summary(),
+                            "recent_activity": board.recent_activity(limit=8),
+                        },
+                        ensure_ascii=False,
+                    )
+                ),
+            }
+        )
+        emitter.emit("orchestrator.started", {"mode": "review", "task_id": task["id"]})
+        review = orchestrator_agent.review_task(review_messages)
+        emitter.emit(
+            "orchestrator.decision",
+            {"action": "review_task", "task_id": task["id"], "outcome": review.outcome},
+        )
+
+        if review.outcome == "ask_user":
+            emitter.emit("input.required", {"question": review.validation_notes})
+            user_response = wait_for_input(review.validation_notes)
+            if is_cancelled():
+                raise RunCancelled()
+            session.add_message({"role": "user", "content": user_response})
+            board.reopen(task["id"], "User clarification requested before validation.")
+            board.objective(user_response)
+            return
+
+        if getattr(review, "new_tasks", None):
+            created = board.add_tasks(
+                [item.model_dump(exclude_none=True) for item in review.new_tasks],
+                created_by=orchestrator_agent.name,
+            )
+            if created:
+                session.add_message(
+                    {
+                        "role": "assistant",
+                        "content": f"Orchestrator created {len(created)} follow-up tasks during review.",
+                    }
+                )
+
+        if review.outcome == "accept":
+            board.validate(task["id"], accepted=True, validation_notes=review.validation_notes)
+        elif review.outcome == "rework":
+            board.validate(task["id"], accepted=False, validation_notes=review.validation_notes)
+        elif review.outcome == "cancel":
+            board.cancel(task["id"], review.validation_notes)
+
+        session.add_message(
+            {
+                "role": "assistant",
+                "content": f"Task {task['task_key']} review outcome: {review.outcome}. {review.validation_notes}",
+            }
+        )
 
     def _run_loop(
         self,
@@ -319,206 +440,284 @@ class AgentRunner:
         wait_for_input: WaitForInput,
         is_cancelled: IsCancelled,
     ):
-        queue = WorkQueue(agent_workspace, session.id)
-        objective = next((m.get("content", "") for m in reversed(session.messages) if m.get("role") == "user"), "")
-        objective = queue.objective(str(objective))
+        board = TaskBoard(agent_workspace, session.id)
+        objective = next(
+            (m.get("content", "") for m in reversed(session.messages) if m.get("role") == "user"),
+            "",
+        )
+        objective = board.objective(str(objective))
+
         for step in range(config["max_steps"]):
             if is_cancelled():
                 raise RunCancelled()
 
             emitter.emit("step.started", {"step": step})
-
-            recent_query = next(
-                (
-                    message.get("content")
-                    for message in reversed(session.messages)
-                    if message.get("role") == "user" and message.get("content")
-                ),
-                None,
+            self._ensure_tasks_planned(
+                board=board,
+                session=session,
+                objective=objective,
+                orchestrator_agent=orchestrator_agent,
+                emitter=emitter,
+                context_budget=orchestrator_context_budget,
             )
-            historical_context = ""
-            if recent_query:
-                retrieval_limit = Session.suggest_retrieval_limit(
-                    context_budget_chars=orchestrator_context_budget // 5,
-                    min_limit=1,
-                    max_limit=6,
-                    chars_per_match=450,
-                )
-                historical_context = session.format_retrieval_context(
-                    query=recent_query,
-                    limit=retrieval_limit,
-                    max_chars=max(600, orchestrator_context_budget // 6),
-                )
 
-            plan_text, _ = _read_active_plan_context(agent_workspace, session.id)
+            coverage = board.verify()
+            emitter.emit("work.coverage", coverage)
+            if coverage["remaining"] == 0 and board.has_tasks():
+                finalized, final_response = _finalize_completed_work(
+                    board=board,
+                    response_agent=response_agent,
+                    session=session,
+                    response_context_budget=response_context_budget,
+                    response_schema_source=response_schema_source,
+                    emitter=emitter,
+                    is_cancelled=is_cancelled,
+                    completion_note=(
+                        "Summarize the completed work in the required JSON structure. "
+                        "Use the validated task board report as evidence. "
+                        "Never invent filenames or claim work was tested without evidence."
+                    ),
+                )
+                if finalized:
+                    return final_response
 
-            orchestrator_messages = session.get_bounded_context(
+            if board.list_tasks(statuses=["reported", "blocked"], limit=1):
+                self._review_reported_task(
+                    board=board,
+                    session=session,
+                    objective=objective,
+                    orchestrator_agent=orchestrator_agent,
+                    emitter=emitter,
+                    wait_for_input=wait_for_input,
+                    is_cancelled=is_cancelled,
+                    context_budget=orchestrator_context_budget,
+                )
+                objective = board.objective("")
+                continue
+
+            ready_tasks = board.list_tasks(statuses=["ready"], limit=6)
+            if not ready_tasks:
+                session.add_message(
+                    {
+                        "role": "user",
+                        "content": (
+                            "No ready tasks are available, but the task board is not finished. "
+                            "Resolve blocked tasks or ask the user for clarification."
+                        ),
+                    }
+                )
+                objective = board.objective("")
+                continue
+
+            orchestration_messages = session.get_bounded_context(
                 max_recent_messages=12,
                 max_context_chars=orchestrator_context_budget,
             )
-            if plan_text is not None:
-                orchestrator_messages.insert(
-                    0,
-                    {
-                        "role": "system",
-                        "content": (
-                            "Active plan (source of truth). Follow this plan and update it "
-                            f"instead of creating a separate one.\n\n{plan_text}"
-                        ),
-                    },
-                )
-            else:
-                orchestrator_messages.insert(
-                    0,
-                    {
-                        "role": "system",
-                        "content": (
-                            "No active plan file found at PLAN.md. "
-                            "Delegate to PLANNER to create one before substantial implementation tasks."
-                        ),
-                    },
-                )
-
-            if historical_context:
-                orchestrator_messages.insert(0, {"role": "system", "content": historical_context})
-
-            durable_context = (EXECUTION_POLICY + "\nCurrent objective: " + str(objective)
-                               + "\nDurable work status: " + json.dumps(queue.summary()))
-            orchestrator_messages.append({"role": "user", "content": durable_context})
-            emitter.emit("orchestrator.started", {"step": step})
-            orchestrator_response = orchestrator_agent.chat_structured(messages=orchestrator_messages)
+            retrieval_context = self._build_retrieval_context(session, objective, orchestrator_context_budget)
+            if retrieval_context:
+                orchestration_messages.insert(0, {"role": "system", "content": retrieval_context})
+            orchestration_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        EXECUTION_POLICY
+                        + "\nCurrent objective: "
+                        + objective
+                        + "\nTask board summary: "
+                        + json.dumps(board.summary(), ensure_ascii=False)
+                        + "\nReady tasks: "
+                        + json.dumps(ready_tasks, ensure_ascii=False)
+                        + "\nChoose the best next task and the best available agent for it."
+                    ),
+                }
+            )
+            emitter.emit("orchestrator.started", {"step": step, "mode": "dispatch"})
+            decision = orchestrator_agent.decide_next_action(orchestration_messages)
             emitter.emit(
                 "orchestrator.decision",
-                {"action": orchestrator_response.action, "description": orchestrator_response.description},
+                {"action": decision.action, "description": decision.description, "task_key": decision.task_key},
             )
+            session.add_message({"role": "assistant", "content": decision.description})
 
-            session.add_message({"role": "assistant", "content": orchestrator_response.description})
-
-            if orchestrator_response.action == "delegate_to_agent":
-                delegated_name = orchestrator_response.agent_name
-                planner = _planner_name(agents)
-
-                if plan_text is None and planner is not None and delegated_name != planner:
-                    delegated_name = planner
-                    session.add_message(
-                        {
-                            "role": "system",
-                            "content": (
-                                "Delegation overridden to PLANNER because no active PLAN.md exists yet. "
-                                "Create/refresh PLAN.md first."
-                            ),
-                        }
-                    )
-
-                delegated_agent = _find_agent_by_name(agents, delegated_name)
-                if delegated_agent is not None:
-                    emitter.emit("agent.delegated", {"agent": delegated_agent.name})
-
-                    # Every delegation has a durable unit of work. This prevents a
-                    # worker from treating exploratory shell output as completion.
-                    queue_before = queue.summary()
-                    if not queue_before["remaining"]:
-                        created = queue.add(
-                            f"{delegated_agent.name}: {orchestrator_response.description}"
-                        )
-                        queue_before = queue.summary()
-                        logger.info("Created delegated work item run_session=%s task_id=%s agent=%s",
-                                    session.id, created["id"], delegated_agent.name)
-
-                    worker_context = (EXECUTION_POLICY + "\nCurrent objective: " + str(objective)
-                                      + "\nDurable work status: " + json.dumps(queue_before))
-
-                    agent_messages = session.get_bounded_context(
-                        max_recent_messages=12,
-                        max_context_chars=delegated_context_budget,
-                    )
-
-                    if plan_text is not None:
-                        agent_messages.insert(
-                            0,
-                            {
-                                "role": "system",
-                                "content": (
-                                    "Execution must follow active PLAN.md. "
-                                    "If work changes scope, update PLAN.md first, then continue.\n" + plan_text
-                                ),
-                            },
-                        )
-
-                    agent_messages.append({"role": "user", "content": (
-                        worker_context + "\nDelegated task: " + orchestrator_response.description
-                        + "\nYou must call work_queue(action='next') before run_shell. "
-                        "Complete the claimed item with evidence and artifact paths, or mark it failed with a reason. "
-                        "Do not report this delegation as complete until the queue records it."
-                    )})
-                    try:
-                        delegated_agent.chat(
-                            agent_messages,
-                            session,
-                            emit=lambda event_type, data: emitter.emit(event_type, data),
-                            is_cancelled=is_cancelled,
-                            max_iterations=int(config.get("max_worker_iterations", 100)),
-                        )
-                    except BudgetExhausted:
-                        emitter.emit("agent.yielded", {"agent": delegated_agent.name, "reason": "iteration_budget"})
-                        session.add_message({"role": "assistant", "content":
-                            "Worker batch ended. Resume from work_queue and archived tool results; work is not yet complete."})
-                    queue_after = queue.summary()
-                    emitter.emit("agent.batch.completed", {
-                        "agent": delegated_agent.name,
-                        "remaining": queue_after["remaining"],
-                        "counts": queue_after["counts"],
-                    })
-                    if queue_after["remaining"]:
-                        session.add_message({"role": "system", "content": (
-                            "The delegated worker returned, but durable work remains. "
-                            "Do not treat its narrative as completion; delegate the queue's next item or resolve its failure."
-                        )})
-
-
-            if orchestrator_response.action == "ask_user":
-                emitter.emit("input.required", {"question": orchestrator_response.description})
-                user_response = wait_for_input(orchestrator_response.description)
+            if decision.action == "ask_user":
+                emitter.emit("input.required", {"question": decision.description})
+                user_response = wait_for_input(decision.description)
                 if is_cancelled():
                     raise RunCancelled()
                 session.add_message({"role": "user", "content": user_response})
-                objective += "\nUser clarification: " + user_response
+                objective = board.objective(user_response)
+                continue
 
+            if decision.action == "finish":
+                finalized, final_response = _finalize_completed_work(
+                    board=board,
+                    response_agent=response_agent,
+                    session=session,
+                    response_context_budget=response_context_budget,
+                    response_schema_source=response_schema_source,
+                    emitter=emitter,
+                    is_cancelled=is_cancelled,
+                    completion_note=(
+                        "Summarize the completed work in the required JSON structure. "
+                        "Use the validated task board report as evidence. "
+                        "Never invent filenames or claim work was tested without evidence."
+                    ),
+                )
+                if finalized:
+                    return final_response
+                session.add_message(
+                    {
+                        "role": "user",
+                        "content": "Finish rejected because the task board still has open work. Continue orchestration.",
+                    }
+                )
+                objective = board.objective("")
+                continue
+
+            delegated_agent = _find_agent_by_name(agents, decision.agent_name)
+            if delegated_agent is None:
+                session.add_message(
+                    {
+                        "role": "user",
+                        "content": f"Delegation rejected because agent {decision.agent_name} is unavailable.",
+                    }
+                )
+                continue
+
+            task = board.get_task(task_key=decision.task_key) or board.next_ready()
+            if task is None or task["status"] != "ready":
+                session.add_message(
+                    {
+                        "role": "user",
+                        "content": "Delegation rejected because the chosen task is not ready anymore. Pick another ready task.",
+                    }
+                )
+                continue
+
+            task = board.begin_task(task["id"], delegated_agent.name, decision.description)
+            emitter.emit(
+                "agent.delegated",
+                {"agent": delegated_agent.name, "task_id": task["id"], "task_key": task["task_key"]},
+            )
+            session.add_message(
+                {
+                    "role": "assistant",
+                    "content": f"Delegated {task['task_key']} to {delegated_agent.name}: {decision.description}",
+                }
+            )
+
+            agent_messages = session.get_bounded_context(
+                max_recent_messages=12,
+                max_context_chars=delegated_context_budget,
+            )
+            worker_query = " ".join(
+                part for part in [task.get("title", ""), task.get("description", ""), decision.description] if part
+            )
+            worker_retrieval = self._build_retrieval_context(session, worker_query, delegated_context_budget)
+            if worker_retrieval:
+                agent_messages.insert(0, {"role": "system", "content": worker_retrieval})
+            agent_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        EXECUTION_POLICY
+                        + "\nCurrent objective: "
+                        + objective
+                        + "\nCurrent delegated task: "
+                        + json.dumps(task, ensure_ascii=False)
+                        + "\nTask board summary: "
+                        + json.dumps(board.summary(), ensure_ascii=False)
+                        + "\nComplete only this task. Use task_board(action='current' or 'get') to inspect it. "
+                        + "When the work is done, report back with task_board(action='submit') including a concise summary, concrete evidence, and exact artifact paths. "
+                        + "If you are blocked, use task_board(action='block') with the real reason."
+                    ),
+                }
+            )
+
+            try:
+                delegated_agent.chat(
+                    agent_messages,
+                    session,
+                    emit=lambda event_type, data: emitter.emit(event_type, data),
+                    is_cancelled=is_cancelled,
+                    max_iterations=int(config.get("max_worker_iterations", 100)),
+                )
+            except BudgetExhausted:
+                emitter.emit("agent.yielded", {"agent": delegated_agent.name, "reason": "iteration_budget"})
+                session.add_message(
+                    {
+                        "role": "assistant",
+                        "content": (
+                            f"Worker batch for {task['task_key']} ended before a final report. "
+                            "Resume from task_board state and archived tool results."
+                        ),
+                    }
+                )
+
+            task_after = board.get_task(task_id=task["id"])
+            if task_after is not None and task_after["status"] == "in_progress":
+                board.block(
+                    task["id"],
+                    "Worker returned control without submitting a task report.",
+                    delegated_agent.name,
+                )
+                task_after = board.get_task(task_id=task["id"])
+
+            if task_after is not None and task_after["status"] in {"reported", "blocked"}:
+                session.add_message(
+                    {
+                        "role": "assistant",
+                        "content": (
+                            f"Task {task_after['task_key']} status={task_after['status']}. "
+                            f"Summary: {task_after.get('result_summary') or 'n/a'}. "
+                            f"Evidence: {task_after.get('evidence') or task_after.get('last_error') or 'n/a'}"
+                        ),
+                    }
+                )
+
+            emitter.emit(
+                "agent.batch.completed",
+                {
+                    "agent": delegated_agent.name,
+                    "task_id": task["id"],
+                    "task_status": task_after["status"] if task_after else "unknown",
+                    "remaining": board.summary()["remaining"],
+                },
+            )
+
+        emitter.emit("run.force_finished", {"reason": "step_budget_reached", "max_steps": config["max_steps"]})
+        if response_agent is not None:
+            coverage = board.verify()
+            emitter.emit("work.coverage", coverage)
+            final_messages = session.get_bounded_context(
+                max_recent_messages=20,
+                max_context_chars=response_context_budget,
+            )
+            final_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "The orchestration step budget was reached before the task board fully completed. "
+                        "Summarize the actual state honestly in the required JSON structure, including what "
+                        "was validated, what remains open, and any blockers.\n"
+                        + json.dumps(
+                            {
+                                "completion_report": board.completion_report(),
+                                "coverage": coverage,
+                                "recent_activity": board.recent_activity(limit=12),
+                            },
+                            ensure_ascii=False,
+                        )
+                    ),
+                }
+            )
+            final_response = response_agent.chat_structured(
+                messages=final_messages,
+                schema_source=response_schema_source,
+                session=session,
+            )
             if is_cancelled():
                 raise RunCancelled()
-            should_finalize = orchestrator_response.action == "finish"
-            if should_finalize:
-                coverage = queue.verify()
-                emitter.emit("work.coverage", coverage)
-                if coverage["remaining"]:
-                    session.add_message({"role": "user", "content":
-                        "Completion rejected: durable queue has unfinished or invalidated tasks. Resume work_queue next; resolve failures before finishing."})
-                    continue
-
-            if should_finalize:
-                if response_agent is not None:
-                    emitter.emit("response.started", {})
-                    final_messages = session.get_bounded_context(
-                        max_recent_messages=20,
-                        max_context_chars=response_context_budget,
-                    )
-                    final_messages.append(
-                        {
-                            "role": "user",
-                            "content": ("Summarize the completed work in the required JSON structure. "
-                                        "Use the following verified artifact paths and counts as evidence. "
-                                        "Never invent filenames or claim content was tested without evidence.\n"
-                                        + json.dumps(queue.completion_report())),
-                        }
-                    )
-                    final_response = response_agent.chat_structured(
-                        messages=final_messages,
-                        schema_source=response_schema_source,
-                        session=session,
-                    )
-                    if is_cancelled():
-                        raise RunCancelled()
-                    return final_response
-                return None
+            return final_response
 
         raise BudgetExhausted("Run step budget reached; resume this session to continue durable work.")

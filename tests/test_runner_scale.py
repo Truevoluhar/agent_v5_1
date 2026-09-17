@@ -4,16 +4,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent.execution import BudgetExhausted
-from agent.runner import AgentRunner, _prepare_plan_for_new_session, _read_active_plan_context
-from agent.work_queue import WorkQueue
+from agent.runner import AgentRunner
+from agent.work_queue import TaskBoard
 
 
 class SessionStub:
-    id = 'test'
-    messages = []
+    id = "test"
 
     def __init__(self):
-        self.messages = [{'role': 'user', 'content': 'Do all tasks'}]
+        self.messages = [{"role": "user", "content": "Do all tasks"}]
 
     def add_message(self, message):
         self.messages.append(message)
@@ -22,7 +21,7 @@ class SessionStub:
         return list(self.messages)
 
     def format_retrieval_context(self, **kwargs):
-        return ''
+        return ""
 
 
 class RunnerScaleTests(unittest.TestCase):
@@ -36,73 +35,126 @@ class RunnerScaleTests(unittest.TestCase):
     def test_empty_prompt_uses_default_session_title(self):
         self.assertEqual(AgentRunner._generate_session_name("  \n"), "New chat")
 
-    def test_new_session_archives_another_sessions_active_plan(self):
-        with tempfile.TemporaryDirectory() as workspace:
-            root = Path(workspace)
-            (root / 'PLAN.md').write_text('# Old task', encoding='utf-8')
-            result = _prepare_plan_for_new_session(workspace, 'new-session')
-            self.assertFalse((root / 'PLAN.md').exists())
-            self.assertEqual(Path(result['archived_to']).read_text(encoding='utf-8'), '# Old task')
-
-            (root / 'PLAN.md').write_text('# New task', encoding='utf-8')
-            self.assertEqual(_read_active_plan_context(workspace, 'new-session')[0], '# New task')
-            self.assertIsNone(_read_active_plan_context(workspace, 'other-session')[0])
-
-    def run_loop(self, workspace, decision, agents=None, steps=2):
-        orchestrator = SimpleNamespace(chat_structured=lambda **kwargs: decision)
+    def run_loop(self, workspace, orchestrator, agents=None, steps=3):
         emitter = SimpleNamespace(emit=lambda *args: None)
-        return AgentRunner.__new__(AgentRunner)._run_loop(
-            session=SessionStub(), config={'max_steps': steps}, agents=agents or [],
-            orchestrator_agent=orchestrator, response_agent=None,
-            agent_workspace=workspace, orchestrator_context_budget=10000,
-            delegated_context_budget=10000, response_context_budget=10000,
-            response_schema_source=None, emitter=emitter,
-            wait_for_input=lambda question: '', is_cancelled=lambda: False,
+        runner = AgentRunner.__new__(AgentRunner)
+        return runner._run_loop(
+            session=SessionStub(),
+            config={"max_steps": steps, "max_worker_iterations": 5},
+            agents=agents or [],
+            orchestrator_agent=orchestrator,
+            response_agent=None,
+            agent_workspace=workspace,
+            orchestrator_context_budget=10000,
+            delegated_context_budget=10000,
+            response_context_budget=10000,
+            response_schema_source=None,
+            emitter=emitter,
+            wait_for_input=lambda question: "",
+            is_cancelled=lambda: False,
         )
 
-    def test_finish_is_rejected_when_queue_is_incomplete(self):
+    def test_finish_is_rejected_when_board_is_incomplete(self):
         with tempfile.TemporaryDirectory() as workspace:
-            WorkQueue(workspace, 'test').add('unfinished')
+            board = TaskBoard(workspace, "test")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "TASK-1",
+                        "title": "Unfinished",
+                        "description": "Do it",
+                        "task_type": "implementation",
+                        "priority": 1,
+                    }
+                ]
+            )
+            orchestrator = SimpleNamespace(
+                plan_tasks=lambda messages: SimpleNamespace(summary="unused", tasks=[]),
+                decide_next_action=lambda messages: SimpleNamespace(action="finish", description="done", task_key=None, agent_name=None),
+                review_task=lambda messages: SimpleNamespace(outcome="accept", validation_notes="ok", new_tasks=[]),
+            )
             with self.assertRaises(BudgetExhausted):
-                self.run_loop(workspace, SimpleNamespace(action='finish', description='done'))
-
-    def test_step_limit_is_not_success(self):
-        with tempfile.TemporaryDirectory() as workspace:
-            with self.assertRaises(BudgetExhausted):
-                self.run_loop(workspace, SimpleNamespace(action='delegate_to_agent', agent_name='none', description='working'))
+                self.run_loop(workspace, orchestrator, steps=1)
 
     def test_worker_budget_yields_and_next_batch_can_finish(self):
         with tempfile.TemporaryDirectory() as workspace:
-            queue = WorkQueue(workspace, 'test')
-            queue.add('work')
+            board = TaskBoard(workspace, "test")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "TASK-1",
+                        "title": "Work",
+                        "description": "Continue",
+                        "task_type": "implementation",
+                        "priority": 1,
+                    }
+                ]
+            )
             calls = []
+
             def chat(*args, **kwargs):
                 calls.append(1)
+                task = board.get_task(task_key="TASK-1")
                 if len(calls) == 1:
                     raise BudgetExhausted()
-                task = queue.claim()
-                queue.finish(task['id'], 'validated', [])
-            worker = SimpleNamespace(name='WORKER', chat=chat)
-            decision = SimpleNamespace(action='delegate_to_agent', agent_name='WORKER', description='continue')
-            with self.assertRaises(BudgetExhausted):
-                self.run_loop(workspace, decision, [worker])
-            self.assertEqual(len(calls), 2)
-            self.assertEqual(queue.summary()['remaining'], 0)
-            self.assertIsNone(self.run_loop(workspace, SimpleNamespace(action='finish', description='done')))
+                board.submit(task["id"], summary="done", evidence="validated", artifacts=[])
 
-    def test_delegation_creates_a_durable_task_and_passes_it_to_worker(self):
+            worker = SimpleNamespace(name="WORKER", chat=chat)
+            decisions = [
+                SimpleNamespace(action="delegate_to_agent", agent_name="WORKER", task_key="TASK-1", description="Do the work"),
+                SimpleNamespace(action="delegate_to_agent", agent_name="WORKER", task_key="TASK-1", description="Resume the work"),
+                SimpleNamespace(action="finish", description="done", task_key=None, agent_name=None),
+            ]
+            orchestrator = SimpleNamespace(
+                plan_tasks=lambda messages: SimpleNamespace(summary="unused", tasks=[]),
+                decide_next_action=lambda messages: decisions.pop(0),
+                review_task=lambda messages: (
+                    SimpleNamespace(outcome="rework", validation_notes="resume it", new_tasks=[])
+                    if '"status": "blocked"' in messages[-1]["content"]
+                    else SimpleNamespace(outcome="accept", validation_notes="accepted", new_tasks=[])
+                ),
+            )
+            self.assertIsNone(self.run_loop(workspace, orchestrator, [worker], steps=5))
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(board.summary()["remaining"], 0)
+
+    def test_delegation_passes_current_task_to_worker(self):
         with tempfile.TemporaryDirectory() as workspace:
             captured = []
+            board = TaskBoard(workspace, "test")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "TASK-IMPL",
+                        "title": "Implement",
+                        "description": "Implement the change",
+                        "task_type": "implementation",
+                        "priority": 1,
+                    }
+                ]
+            )
+
             def chat(messages, *args, **kwargs):
                 captured.extend(messages)
-                queue = WorkQueue(workspace, 'test')
-                task = queue.claim()
-                queue.finish(task['id'], 'implemented and checked', [])
-            worker = SimpleNamespace(name='WORKER', chat=chat)
-            decision = SimpleNamespace(action='delegate_to_agent', agent_name='WORKER', description='Implement the change')
-            with self.assertRaises(BudgetExhausted):
-                self.run_loop(workspace, decision, [worker], steps=1)
-            self.assertEqual(WorkQueue(workspace, 'test').summary()['counts'], {'completed': 1})
-            worker_prompt = captured[-1]['content']
-            self.assertIn('Implement the change', worker_prompt)
-            self.assertIn("work_queue(action='next')", worker_prompt)
+                task = board.get_task(task_key="TASK-IMPL")
+                board.submit(task["id"], summary="implemented", evidence="checked", artifacts=[])
+
+            worker = SimpleNamespace(name="WORKER", chat=chat)
+            orchestrator = SimpleNamespace(
+                plan_tasks=lambda messages: SimpleNamespace(summary="unused", tasks=[]),
+                decide_next_action=lambda messages: SimpleNamespace(
+                    action="delegate_to_agent",
+                    agent_name="WORKER",
+                    task_key="TASK-IMPL",
+                    description="Implement the change",
+                ),
+                review_task=lambda messages: SimpleNamespace(outcome="accept", validation_notes="accepted", new_tasks=[]),
+            )
+            self.assertIsNone(self.run_loop(workspace, orchestrator, [worker], steps=3))
+            worker_prompt = captured[-1]["content"]
+            self.assertIn("Implement the change", worker_prompt)
+            self.assertIn("task_board(action='submit')", worker_prompt)
+
+
+if __name__ == "__main__":
+    unittest.main()

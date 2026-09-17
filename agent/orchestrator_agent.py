@@ -1,113 +1,166 @@
-import json
+from __future__ import annotations
+
 from collections.abc import Iterable
-from typing_extensions import Self
-from typing import Any, Type, Literal, Optional, Union, TypeVar
-from dataclasses import dataclass, asdict, is_dataclass
+from typing import Any, Literal, Optional, Type, TypeVar, Union
 
-import uuid
 from openai import OpenAI
-from pydantic import BaseModel, Field, create_model, model_validator, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
+from typing_extensions import Self
 
-from agent.llm import create_client, generation_options, normalize_chat_messages
 from agent.context_guard import ContextLimits, ContextWindowGuard
-from agent.session import Session
 from agent.generic_agent import GenericAgent
-from agent.tools.tools_registry import get_tool_schemas, execute_registered_tool
+from agent.llm import create_client, generation_options, normalize_chat_messages
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
 
-class OrchestratorResponseBase(BaseModel):
 
+TASK_TYPES = Literal[
+    "analysis",
+    "research",
+    "implementation",
+    "verification",
+    "documentation",
+    "coordination",
+    "other",
+]
+
+
+class PlannedTaskBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal[
-        "ask_user",
-        "delegate_to_agent",
-        "finish",
-    ] = Field(
-        description="Action the orchestrator should take."
-    )
+    task_key: str = Field(description="Stable task key such as TASK-ANALYZE-API.")
+    title: str = Field(description="Short human-readable task title.")
+    description: str = Field(description="Precise task description.")
+    task_type: TASK_TYPES = Field(description="Type of work required.")
+    priority: int = Field(ge=1, le=100, description="Lower number means earlier execution.")
+    depends_on_keys: list[str] = Field(default_factory=list, description="Task keys that must finish first.")
+    acceptance_criteria: list[str] = Field(default_factory=list, description="Observable completion checks.")
 
-    description: str = Field(
-        description="Short description of the task or result."
+
+class OrchestratorDecisionBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["ask_user", "delegate_to_agent", "finish"] = Field(
+        description="Next runtime action."
     )
+    description: str = Field(description="Delegation instructions or the question/result summary.")
+    task_key: Optional[str] = Field(default=None, description="Task key when delegating, else null.")
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_non_delegation_agent(cls, value: Any) -> Any:
+    def normalize_non_delegation_task(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
-
-        action = value.get("action")
-        if action != "delegate_to_agent" and value.get("agent_name") is not None:
+        if value.get("action") != "delegate_to_agent":
             normalized = dict(value)
+            normalized["task_key"] = None
             normalized["agent_name"] = None
             return normalized
-
         return value
 
     @model_validator(mode="after")
-    def validate_agent_selection(self) -> Self:
+    def validate_delegation_fields(self) -> Self:
         agent_name = getattr(self, "agent_name", None)
-
         if self.action == "delegate_to_agent":
-            if agent_name is None:
-                raise ValueError("agent_name is required when delegating task to agent")
-        elif agent_name is not None:
-            raise ValueError("agent_name must be null unless delegating task to agent")
-
+            if not self.task_key:
+                raise ValueError("task_key is required when delegating")
+            if not agent_name:
+                raise ValueError("agent_name is required when delegating")
+        else:
+            if self.task_key is not None:
+                raise ValueError("task_key must be null unless delegating")
+            if agent_name is not None:
+                raise ValueError("agent_name must be null unless delegating")
         return self
 
 
-def create_orchestrator_response(
-        available_agents: Iterable[str]
-    ) -> type[BaseModel]:
-        agent_names = tuple(dict.fromkeys(available_agents))
+class TaskReviewBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-        if not agent_names:
-            raise ValueError("No agent available")
+    outcome: Literal["accept", "rework", "cancel", "ask_user"] = Field(
+        description="How the orchestrator wants to resolve the worker report."
+    )
+    validation_notes: str = Field(description="Validation result or the follow-up question.")
 
-        AgentName = Literal.__getitem__(agent_names)
 
-        return create_model(
-            "OrchestratorResponse",
-            __base__=OrchestratorResponseBase,
-            agent_name = (
-                Optional[AgentName],
-                Field(
-                    default=None,
-                    description=(
-                        "Must be one of the currently available agent names when delegating. Otherwise null."
-                    )
-                )
-            )
-        )
+def _planned_task_model(available_agents: Iterable[str]) -> type[BaseModel]:
+    agent_names = tuple(dict.fromkeys(available_agents))
+    if not agent_names:
+        raise ValueError("No agent available")
+    AgentName = Literal.__getitem__(agent_names)
+    return create_model(
+        "PlannedTask",
+        __base__=PlannedTaskBase,
+        suggested_agent=(
+            Optional[AgentName],
+            Field(default=None, description="Best available agent for this task, if clear."),
+        ),
+    )
+
+
+def create_task_planning_response(available_agents: Iterable[str]) -> type[BaseModel]:
+    planned_task_model = _planned_task_model(available_agents)
+    return create_model(
+        "TaskPlanningResponse",
+        summary=(str, Field(description="Short planning summary.")),
+        tasks=(list[planned_task_model], Field(description="Ordered task list.")),
+        __base__=BaseModel,
+    )
+
+
+def create_orchestrator_decision(available_agents: Iterable[str]) -> type[BaseModel]:
+    agent_names = tuple(dict.fromkeys(available_agents))
+    if not agent_names:
+        raise ValueError("No agent available")
+    AgentName = Literal.__getitem__(agent_names)
+    return create_model(
+        "OrchestratorDecision",
+        __base__=OrchestratorDecisionBase,
+        agent_name=(
+            Optional[AgentName],
+            Field(
+                default=None,
+                description="Must be one of the available agent names when delegating, else null.",
+            ),
+        ),
+    )
+
+
+def create_task_review_response(available_agents: Iterable[str]) -> type[BaseModel]:
+    planned_task_model = _planned_task_model(available_agents)
+    return create_model(
+        "TaskReviewResponse",
+        __base__=TaskReviewBase,
+        new_tasks=(
+            list[planned_task_model],
+            Field(default_factory=list, description="Optional follow-up tasks discovered during review."),
+        ),
+    )
+
+
+def create_orchestrator_response(available_agents: Iterable[str]) -> type[BaseModel]:
+    return create_orchestrator_decision(available_agents)
 
 
 class OrchestratorAgent:
-
     id: int
-
     name: str
     system_message: str
     agentmd: str
     skillsmd: str
     resources_path: str
     workspace_path: str
-
     model: str
     api_key: str
     base_url: str
     temperature: float
     context_limits: ContextLimits
     context_guard: ContextWindowGuard
-    
     client: Union[OpenAI, Any]
-
     available_agents: list[str]
-    response_model: Type[BaseModel]
-
-
+    planning_model: Type[BaseModel]
+    decision_model: Type[BaseModel]
+    review_model: Type[BaseModel]
 
     def __init__(
         self,
@@ -125,313 +178,60 @@ class OrchestratorAgent:
     ):
         self.llm_options = dict(llm_options or {})
         self.id = id
-        
         self.name = name
         self.resources_path = resources_path
         self.workspace_path = workspace_path
-
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
         self.temperature = temperature
         self.context_limits = ContextLimits.from_dict(context_limits)
         self.context_guard = ContextWindowGuard(self.context_limits)
-
         self.agentmd = self.load_agentmd(self.name)
         self.skillsmd = self.load_skillsmd(self.name)
         self.client = self.init_client()
-        
-        self.available_agents = list(
-            dict.fromkeys(available_agents)
-        )
-        self.response_model = create_orchestrator_response(self.available_agents)
+        self.available_agents = list(dict.fromkeys(available_agents))
+        self.planning_model = create_task_planning_response(self.available_agents)
+        self.decision_model = create_orchestrator_decision(self.available_agents)
+        self.review_model = create_task_review_response(self.available_agents)
+        self.system_message = self.context_guard.trim_system_message(self.create_system_message())
 
-        self.system_message = self.context_guard.trim_system_message(
-            self.create_system_message()
-        )
-
-
-
-    def load_agentmd(self, agent_name: str) -> None:
-
-        print(f"[{self.name}] Loading System Message ...")
-
+    def load_agentmd(self, agent_name: str) -> str:
         path = self.resources_path + "/" + agent_name + "/AGENT.md"
-        with open(path, "r") as f:
-            content = f.read()
-            return content
-        
-    
-    def load_skillsmd(self, agent_name: str) -> None:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
 
-        print(f"[{self.name}] Loading Skills Message ...")
-
+    def load_skillsmd(self, agent_name: str) -> str:
         path = self.resources_path + "/" + agent_name + "/SKILLS.md"
-        with open(path, "r") as f:
-            content = f.read()
-            return content
-        
-    
-    def init_client(self) -> None:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
 
+    def init_client(self):
         return create_client(self.api_key, self.base_url, self.llm_options)
-    
 
-    def create_system_message(self):
-
-        sys_msg = ""
-
-        sys_msg += self.agentmd
-        sys_msg += self.skillsmd
-
-        sys_msg += "\n\n IMPORTANT ORCHESTRATION RULES \n"
-        sys_msg += "- If the task has been completed and no further delegation or user input is required, return action='finish'.\n"
-        sys_msg += "- For action='finish' or action='ask_user', always return agent_name=null.\n"
-        sys_msg += "- Only include an agent_name when action='delegate_to_agent'.\n"
-        sys_msg += "- A response agent will create the final structured response after you finish.\n"
-        sys_msg += "- Prefer 'finish' over endless delegation once the work requested by the user is complete.\n"
-        sys_msg += "\n\n AVAILABLE AGENTS \n"
-        for ag in self.available_agents:
-            sys_msg += f"OFFICIAL AGENT NAME: {ag}\n"
-            ag_system_message = self.load_agentmd(ag)
-            ag_skills = self.load_skillsmd(ag)
-            sys_msg += ag_system_message
-            sys_msg += ag_skills
-        
+    def create_system_message(self) -> str:
+        sys_msg = self.agentmd + self.skillsmd
+        sys_msg += "\n\nIMPORTANT ORCHESTRATION RULES\n"
+        sys_msg += "- The SQLite task board is the runtime source of truth for planning, task order, assignment, and completion.\n"
+        sys_msg += "- Break work into small tasks with explicit acceptance criteria and sensible dependencies.\n"
+        sys_msg += "- Delegate to the best available agent for the specific task, not for the whole project at once.\n"
+        sys_msg += "- A worker report is not accepted automatically; review it, validate it against evidence, then either accept it, return it for rework, cancel it, or ask the user.\n"
+        sys_msg += "- Finish only when all task-board tasks are validated or cancelled and the user goal is satisfied.\n"
+        sys_msg += "\nAVAILABLE AGENTS\n"
+        for agent_name in self.available_agents:
+            sys_msg += f"OFFICIAL AGENT NAME: {agent_name}\n"
+            sys_msg += self.load_agentmd(agent_name)
+            sys_msg += self.load_skillsmd(agent_name)
         return sys_msg
 
-
-
-
-
-
-    def chat(self, messages: list[dict]) -> str:
-        response = None
-        last_error: Exception | None = None
-
-        for attempt in range(1, self.context_limits.max_retries + 1):
-            bounded_messages = self.context_guard.trim_messages(messages, attempt=attempt)
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=bounded_messages,
-                    **generation_options(self.llm_options, self.temperature),
-                )
-                break
-            except Exception as exc:
-                last_error = exc
-                if not self.context_guard.is_context_length_error(exc):
-                    raise
-
-        if response is None:
-            raise RuntimeError(
-                "Failed to create completion after context trimming retries."
-            ) from last_error
-
-        message = response.choices[0].message
-
-        return message
-    
-
-    def chat_structured(
-            self,
-            messages: list[dict],
-    ) -> BaseModel:
-
-        
-        # Keep messages separate so trimming preserves the newest objective and
-        # queue checkpoint instead of truncating the tail of one large JSON blob.
-        request_messages = messages
-
+    def _chat_parse(self, messages: list[dict], response_model: type[ResponseT]) -> ResponseT:
         completion = None
         last_error: Exception | None = None
         for attempt in range(1, self.context_limits.max_retries + 1):
-            bounded_messages = self.context_guard.trim_messages(
-                request_messages,
-                attempt=attempt,
-            )
+            bounded_messages = self.context_guard.trim_messages(messages, attempt=attempt)
             bounded_messages = normalize_chat_messages(bounded_messages, self.system_message)
             try:
                 completion = self.client.beta.chat.completions.parse(
-                    model=self.model,
-                    messages=bounded_messages,
-                    response_format=self.response_model,
-                    **generation_options(self.llm_options, self.temperature),
-                )
-                break
-            except Exception as exc:
-                last_error = exc
-                if not self.context_guard.is_context_length_error(exc):
-                    raise
-
-        if completion is None:
-            raise RuntimeError(
-                "Failed to parse orchestrator response after context trimming retries."
-            ) from last_error
-
-        message = completion.choices[0].message
-
-        if message.refusal:
-            raise RuntimeError(f"Model refused the request: {message.refusal}")
-
-        if message.parsed is None:
-            raise RuntimeError(
-                f"Model response could not be parsed. Raw content: {message.content}"
-            )
-
-        parsed_response = message.parsed
-
-        print(f"[{self.name}]: {parsed_response}")
-
-        return parsed_response
-
-    
-    def chat_structured_with_tools(
-        self,
-        messages: list[dict[str, Any]],
-        session: Session,
-        response_model: type[ResponseT]
-    ) -> ResponseT:
-        tools = get_tool_schemas()
-
-        request_messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": self.system_message,
-            },
-            *messages,
-        ]
-
-        max_tool_rounds = 10
-
-        for _ in range(max_tool_rounds):
-            # Use create(), not parse(), during tool execution.
-            completion = None
-            last_error = None
-            for attempt in range(1, self.context_limits.max_retries + 1):
-                bounded_messages = self.context_guard.trim_messages(
-                    request_messages,
-                    attempt=attempt,
-                )
-                try:
-                    completion = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=bounded_messages,
-                        **generation_options(self.llm_options, self.temperature),
-                        tools=tools,
-                        tool_choice="auto",
-                    )
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    if not self.context_guard.is_context_length_error(exc):
-                        raise
-
-            if completion is None:
-                raise RuntimeError(
-                    "Failed to run tool-enabled completion after context trimming retries."
-                ) from last_error
-
-            message = completion.choices[0].message
-            request_messages.append(message)
-            session.add_message(message=self._assistant_message_to_dict(message))
-
-            if message.refusal:
-                raise RuntimeError(
-                    f"Model refused the request: {message.refusal}"
-                )
-
-            if message.tool_calls:
-                request_messages.append(
-                    self._assistant_tool_message_to_dict(message)
-                )
-
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-
-                    try:
-                        arguments = json.loads(
-                            tool_call.function.arguments
-                        )
-                    except json.JSONDecodeError as exc:
-                        raise RuntimeError(
-                            f"Invalid arguments for tool {tool_name!r}: "
-                            f"{tool_call.function.arguments!r}"
-                        ) from exc
-
-                    print(
-                        f"[{self.name}]: "
-                        f"Tool call: {tool_name}({arguments})"
-                    )
-
-                    tool_result = execute_registered_tool(
-                        workspace=self.workspace_path,
-                        tool_name=tool_name,
-                        tool_input=arguments,
-                    )
-
-                    if is_dataclass(tool_result):
-                        tool_payload = asdict(tool_result)
-                    elif isinstance(tool_result, BaseModel):
-                        tool_payload = tool_result.model_dump()
-                    else:
-                        tool_payload = tool_result
-
-                    tool_response = {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": self.context_guard.trim_tool_output(tool_payload),
-                    }
-                    request_messages.append(tool_response)
-                    session.add_message(message=tool_response)
-
-                continue
-
-            # The model has stopped requesting tools.
-            # Preserve its draft answer as context for final serialization.
-            if message.content:
-
-                request_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": message.content,
-                    }
-                )
-                session.add_message(
-                    message={
-                        "role": "assistant",
-                        "content": message.content,
-                    }
-                )
-
-            break
-
-        else:
-            raise RuntimeError(
-                f"Model exceeded {max_tool_rounds} tool-calling rounds."
-            )
-
-        # Separate final call: tools are intentionally omitted.
-        request_messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "Return the final result as exactly one structured response "
-                    "matching the required schema. Do not include commentary, "
-                    "Markdown, or multiple JSON objects."
-                ),
-            }
-        )
-
-        final_completion = None
-        last_error = None
-        for attempt in range(1, self.context_limits.max_retries + 1):
-            bounded_messages = self.context_guard.trim_messages(
-                request_messages,
-                attempt=attempt,
-            )
-            try:
-                final_completion = self.client.chat.completions.parse(
                     model=self.model,
                     messages=bounded_messages,
                     response_format=response_model,
@@ -443,73 +243,16 @@ class OrchestratorAgent:
                 if not self.context_guard.is_context_length_error(exc):
                     raise
 
-        if final_completion is None:
-            raise RuntimeError(
-                "Failed to produce final structured result after context trimming retries."
-            ) from last_error
+        if completion is None:
+            raise RuntimeError("Failed to parse orchestrator response after context trimming retries.") from last_error
 
-        final_message = final_completion.choices[0].message
+        return completion.choices[0].message.parsed
 
-        if final_message.refusal:
-            raise RuntimeError(
-                f"Model refused the request: {final_message.refusal}"
-            )
+    def plan_tasks(self, messages: list[dict]) -> BaseModel:
+        return self._chat_parse(messages, self.planning_model)
 
-        if final_message.parsed is None:
-            raise RuntimeError(
-                "Final response could not be parsed. "
-                f"Raw content: {final_message.content!r}"
-            )
+    def decide_next_action(self, messages: list[dict]) -> BaseModel:
+        return self._chat_parse(messages, self.decision_model)
 
-        parsed_response: ResponseT = final_message.parsed
-
-        print(f"[{self.name}]: {parsed_response}")
-
-        return parsed_response
-
-
-    def _assistant_message_to_dict(self, message: Any) -> dict[str, Any]:
-            
-        result: dict[str, Any] = {
-            "role": "assistant",
-        }
-
-        if message.content is not None:
-            result["content"] = message.content
-
-        if message.refusal is not None:
-            result["refusal"] = message.refusal
-
-        if message.tool_calls:
-            result["tool_calls"] = [
-                tool_call.model_dump(exclude_none=True)
-                for tool_call in message.tool_calls
-            ]
-
-        return result
-
-
-    def _assistant_tool_message_to_dict(
-        self,
-        message: Any,
-    ) -> dict[str, Any]:
-        return {
-            "role": "assistant",
-            "content": message.content,
-            "tool_calls": [
-                {
-                    "id": tool_call.id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments,
-                    },
-                }
-                for tool_call in message.tool_calls or []
-            ],
-        }
-
-
-class CreatePlanResponse(BaseModel):
-    is_plan_created: bool
-    filename: str
+    def review_task(self, messages: list[dict]) -> BaseModel:
+        return self._chat_parse(messages, self.review_model)

@@ -39,11 +39,10 @@ Next action:
 * Preserve exact filenames, paths, URLs, commands, agent names, and important error messages.
 * Summarize long tool outputs instead of copying them.
 * Preserve unresolved problems and agent assignments.
-* Preserve the relationship between the current session, its active `PLAN.md`,
-  and `.agent/work/` state. Do not treat archived plans as current instructions.
+* Preserve the relationship between the current session, its SQLite task board,
+  and recent delegated work state.
 * Remove duplicated or obsolete information.
 * Treat tool results as more reliable than assistant explanations.
 * Never include passwords, API keys, tokens, or other secrets.
 * Never exceed 400 words.
 * Return only the final summary without additional commentary.
-

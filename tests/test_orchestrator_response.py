@@ -30,10 +30,12 @@ class OrchestratorResponseTests(unittest.TestCase):
         response = self.response_model(
             action="delegate_to_agent",
             description="Inspect the artifact usage.",
+            task_key="TASK-1",
             agent_name="PROGRAMMER",
         )
 
         self.assertEqual(response.agent_name, "PROGRAMMER")
+        self.assertEqual(response.task_key, "TASK-1")
 
         with self.assertRaises(ValueError):
             self.response_model(

@@ -6,3 +6,6 @@ Requires-Dist: pydantic>=2.0
 Requires-Dist: PyYAML
 Requires-Dist: python-dotenv
 Requires-Dist: questionary
+Requires-Dist: chromadb
+Requires-Dist: requests
+Requires-Dist: httpx

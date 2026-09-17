@@ -1,6 +1,8 @@
 import json
 import logging
+import math
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List
@@ -11,8 +13,32 @@ except ImportError:  # pragma: no cover - fallback for environments without Chro
     PersistentClient = None
 
 
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"[A-Za-z0-9_./:-]+", text.lower())
+
+
+def _embed_text(text: str, dimensions: int = 256) -> list[float]:
+    vector = [0.0] * dimensions
+    tokens = _tokenize(text)
+    if not tokens:
+        return vector
+
+    for token in tokens:
+        raw = token.encode("utf-8", errors="ignore")
+        digest = __import__("hashlib").sha256(raw).digest()
+        index = int.from_bytes(digest[:4], "big") % dimensions
+        sign = -1.0 if digest[4] % 2 else 1.0
+        weight = 1.0 + min(len(token), 24) / 24.0
+        vector[index] += sign * weight
+
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0:
+        return vector
+    return [value / norm for value in vector]
+
+
 class SemanticMemoryIndex:
-    """Optional Chroma index that never blocks durable session storage."""
+    """Persistent Chroma search using local deterministic embeddings."""
 
     def __init__(self, persist_path: str | None = None, collection_name: str = "agent_session_memory"):
         self.persist_path = Path(persist_path or ".") / "chroma"
@@ -34,6 +60,7 @@ class SemanticMemoryIndex:
             return
 
         try:
+            self.persist_path.mkdir(parents=True, exist_ok=True)
             self.client = PersistentClient(path=str(self.persist_path))
             self.collection = self.client.get_or_create_collection(name=self.collection_name)
             self.available = True
@@ -62,14 +89,13 @@ class SemanticMemoryIndex:
 
             self.collection.add(
                 documents=[text],
+                embeddings=[_embed_text(text)],
                 ids=[doc_id],
-                metadatas=[{"session_id": session_id, "message_id": message_id}],
+                metadatas=[{"session_id": session_id, "message_id": int(message_id)}],
             )
             return True
         except Exception as exc:
-            # Chroma's default embedding function downloads an ONNX model on
-            # first use. Offline/DNS/TLS failures must not abort the agent run.
-            self._disable(f"embedding failed: {type(exc).__name__}: {exc}")
+            self._disable(f"semantic indexing failed: {type(exc).__name__}: {exc}")
             return False
 
     def _index_session_file(self, session_file: Path) -> None:
@@ -98,7 +124,6 @@ class SemanticMemoryIndex:
                 )
 
     def _index_session_directory(self, session_dir: Path, current_session_id: str) -> None:
-        self.persist_path.mkdir(parents=True, exist_ok=True)
         current_session_file = session_dir / f"session_{current_session_id}.sqlite3"
         if current_session_file.exists():
             self._index_session_file(current_session_file)
@@ -112,13 +137,14 @@ class SemanticMemoryIndex:
     ) -> List[Dict[str, Any]]:
         if not self.available or self.collection is None:
             return []
+
         self._index_session_directory(session_dir, current_session_id)
         if not query or not self.available:
             return []
 
         try:
             results = self.collection.query(
-                query_texts=[query],
+                query_embeddings=[_embed_text(query)],
                 n_results=limit,
                 include=["documents", "metadatas", "distances"],
             )

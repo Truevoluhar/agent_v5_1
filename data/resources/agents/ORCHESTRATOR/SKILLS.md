@@ -1,90 +1,41 @@
 # SKILLS.md — Orchestrator Skills
 
-## Skill: Decide Next Action
+## Skill: Task Decomposition
 
-Inspect the user goal, current plan, completed steps, artifacts, and latest results. Choose exactly one next action that moves the task toward completion.
+Create a durable task list from the user request.
 
-Use `finish` only when the goal is complete.
-If the durable work queue has remaining items, delegate its next item or resolve
-its failure. Do not infer completion from a worker's prose.
-For a new session with no active plan, delegate to `PLANNER`. For an existing
-session, keep delegating the queue's current item until it is completed or has a
-recorded failure. The runtime creates queue items automatically; do not ask a
-worker to invent a parallel task list in chat.
+Each task should include:
 
-## Skill: Create Plan
+* a stable task key,
+* a clear title,
+* a precise description,
+* a task type,
+* a priority,
+* dependency keys,
+* acceptance criteria,
+* the best suggested agent when obvious.
 
-Create a plan when the task requires multiple steps.
+## Skill: Delegation
 
-A good plan should contain:
+Choose the next ready task and the best available agent for it.
 
-* step id
-* title
-* assigned agent
-* status
-* short description
+Delegations must be:
 
-Use statuses:
+* bounded,
+* actionable,
+* specific about expected evidence,
+* specific about expected artifacts when applicable.
 
-* `pending`
-* `in_progress`
-* `completed`
-* `failed`
-* `skipped`
+## Skill: Review
 
-Keep plans practical and short.
-Create exactly one active plan file at `PLAN.md`.
+When a worker reports back:
 
-## Skill: Update Plan
+* inspect the summary,
+* inspect the evidence,
+* inspect the artifacts,
+* decide whether to accept, rework, cancel, or ask the user,
+* create follow-up tasks if new work is needed.
 
-Update the plan whenever work is completed, fails, becomes unnecessary, or new steps are discovered.
+## Skill: Completion
 
-Do not recreate the entire plan unless necessary. Prefer targeted updates.
-Never append a second full plan below the first one.
-Use replacement or section replacement so `PLAN.md` stays bounded and readable.
-
-## Skill: Delegate To Agent
-
-Delegate specialist work to the best agent.
-
-Examples:
-
-* Use `planner` for analysis, test design, endpoint extraction, and test case creation.
-* Use `executor` for running saved tests and collecting results.
-* Use `verifier` for reviewing failures, checking correctness, and deciding whether issues are real bugs or bad tests.
-
-Delegated tasks must be specific and include all needed context.
-If no active `PLAN.md` exists, delegate to `PLANNER` first. Include one bounded,
-actionable step in each delegation; do not delegate a whole project as one task.
-
-## Skill: Call Tool
-
-Call tools when direct runtime action is needed.
-
-Examples:
-
-* read a file
-* write a file
-* list files
-* fetch a webservice definition
-* run a test
-* save an artifact
-
-Never call unsafe tools without permission.
-
-## Skill: Ask User
-
-Ask the user only when required information is missing and the task cannot safely continue.
-
-Ask one clear question.
-
-## Skill: Finish
-
-Finish with a concise summary.
-
-Mention:
-
-* what was completed
-* important artifacts
-* important results
-* failures or limitations, if any
+Finish only when the SQLite task board shows no open work and the user goal is satisfied.

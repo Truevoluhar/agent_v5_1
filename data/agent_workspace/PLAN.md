@@ -1,127 +1,196 @@
 # Execution Plan
 
 ## Metadata
-- **Plan status:** READY
-- **Created:** 2026-09-08
-- **Owner:** PLANNER agent
-- **Workspace:** `/data/agent_workspace`
-- **Source of truth:** This file
+- **Project:** 2D Java Strategy Game
+- **Author:** PLANNER
+- **Date:** 2024-06
 
 ## Objective
-Ugotoviti, kdaj je bil identifikator `DGSFPS005001` prvič uporabljen v sistemu IBM BAW, pri tem pa jasno ločiti med datumom prve najdbe v katalogu, datumom nastanka/uporabe referenčnih artefaktov in datumom zadnje spremembe.
+Develop a 2D strategy game in Java where the user can select units, move them on a 2D grid/map, and attack opponent units.
 
 ## Scope
-- Iskanje identifikatorja `DGSFPS005001` v katalogu UDG Toolkit 2/BAW.
-- Določitev, ali je identifikator artefakt, del imena, oznaka ali druga referenca.
-- Pridobitev uporabnikov/reference (where-used), kadar je najden natanko en katalogski artefakt.
-- Primerjava razpoložljivih časovnih podatkov in določitev najzgodnejšega dokazljivega datuma.
-- Dokumentiranje negotovosti, če katalog ne vsebuje zgodovine ali datuma prve uporabe.
+- Java implementation of game logic and UI
+- Unit selection mechanics
+- Unit movement mechanics on a 2D grid
+- Unit attack mechanics including health and damage
+- Basic opponent units controlled either by AI or simple rules
+- Simple 2D graphics rendering
 
 ## Out of Scope
-- Spreminjanje BAW artefaktov ali produkcijskega sistema.
-- Ugibanje datuma brez preverljivega vira.
-- Trditev, da je datum »prva uporaba«, če je v resnici samo datum zadnje spremembe ali datum trenutnega snapshot-a.
-- Iskanje po zunanjih sistemih, ki niso dostopni v okviru kataloga, brez izrecnega vira/dostopa.
+- Multiplayer networking
+- Complex AI
+- Advanced graphics, animations, or sound
+- Level editor or map generator
 
 ## Current State
-- Workspace je prazen glede projektnih datotek; `PLAN.md` pred začetkom ni obstajal.
-- Git repozitorij ni zaznan.
-- Začetna izvedba in preverjanje kataloga še nista izvedena.
+- No existing codebase
+- Conceptual requirement from user
 
 ## Assumptions
-- Identifikator je lahko v imenu ali vsebini enega oziroma več BAW/UDG artefaktov.
-- Katalog lahko vrne tip artefakta, oznake, zadnjega spreminjevalca in datum zadnje spremembe, ne nujno celotne zgodovine.
-- »Prvič uporabljen« bo mogoče dokazati samo, če obstaja časovni podatek za nastanek/prvo referenco; sicer bo rezultat opisan kot najzgodnejši razpoložljivi dokaz.
-- Pri več zadetkih je treba razločiti, ali gre za več artefaktov ali za več rezultatov iste uporabe.
+- Game will run on desktop JVM environment
+- Users interact via mouse and keyboard
+- Turn-based gameplay for simplicity
 
 ## Requirements
-- **REQ-001 — Najdi identifikator:** V katalogu preveri, ali `DGSFPS005001` obstaja in v kakšnem tipu/artefaktu. **Priority:** MUST. **Status:** NOT_STARTED. **Linked steps:** STEP-001.
-- **REQ-002 — Določi uporabo:** Za enolično najden artefakt pridobi seznam artefaktov, ki ga referencirajo. **Priority:** MUST. **Status:** NOT_STARTED. **Linked steps:** STEP-002.
-- **REQ-003 — Ugotovi najzgodnejši datum:** Iz razpoložljivih datumov in zgodovine določi najzgodnejši dokazljiv datum uporabe ter opiši njegovo semantiko. **Priority:** MUST. **Status:** NOT_STARTED. **Linked steps:** STEP-003.
-- **REQ-004 — Poročaj omejitve:** Če katalog ne omogoča zanesljivega datuma prve uporabe, to izrecno navedi in ne nadomesti z datumom zadnje spremembe. **Priority:** MUST. **Status:** NOT_STARTED. **Linked steps:** STEP-003, STEP-004.
-- **REQ-005 — Ohranitev dokazov:** Zabeleži rezultate klicev, najdene artefakte, datume in interpretacijo v preverljivem zapisu. **Priority:** MUST. **Status:** NOT_STARTED. **Linked steps:** STEP-004.
+### REQ-001: Unit Selection
+- Priority: MUST
+- Description: User can select one or multiple units via mouse click or drag selection
+- Acceptance criteria: Clicking on a unit selects it; drag selects multiple units; selected units visibly highlighted
+
+### REQ-002: Unit Movement
+- Priority: MUST
+- Description: Selected units can be moved to valid locations on the map/grid
+- Acceptance criteria: User inputs destination, units move there with animated movement or stepwise grid moves
+
+### REQ-003: Unit Attack
+- Priority: MUST
+- Description: Selected units can attack enemy units within range
+- Acceptance criteria: Attack decrements health of target; target units can die and be removed
+
+### REQ-004: Game Map
+- Priority: SHOULD
+- Description: 2D grid-based game map with cells
+- Acceptance criteria: Map displays grid; units occupy cells
+
+### REQ-005: Basic Opponent Units
+- Priority: SHOULD
+- Description: Opponent has units capable of moving and attacking
+- Acceptance criteria: Opponent units follow simple AI or rules
 
 ## Architecture and Approach
-1. Uporabi katalog UDG Toolkit 2 z začetnim iskanjem samo po `DGSFPS005001`.
-2. Upoštevaj vrnjeni status:
-   - `OK` z enim zadetkom: shrani ime, tip, `poId`, oznake, zadnjega spreminjevalca in razpoložljive datume; nato preveri where-used.
-   - več zadetkov ali `TOO_MANY`: rezultatov ne združuj na pamet; razčleni jih oziroma zahtevaj razločitev, če tip/ime ni dovolj določljiv.
-   - brez zadetkov: največ enkrat poskusi s krajšim/splošnejšim delom imena; nato zaključi kot nenajdeno.
-3. Pri enoličnem artefaktu uporabi `poId` dobesedno iz rezultata za preverjanje referenc.
-4. Na referencah poišči najzgodnejši razpoložljivi časovni dokaz. Če so na voljo le zadnje spremembe, rezultat označi kot »najzgodnejša razpoložljiva evidenca«, ne »prva uporaba«.
-5. Pripravi kratek zaključek z datumom, virom, predmetom datuma, stopnjo gotovosti in omejitvami.
+- Use Java Swing or JavaFX for UI rendering
+- Modular game engine separating input, game state, rendering, and AI
+- Maintain game state with grid cell occupancy, unit states (position, health)
+- Event-driven user input handling
 
 ## Execution Phases
-1. **Discovery:** Iskanje identifikatorja in razrešitev zadetkov.
-2. **Usage analysis:** Pridobitev artefaktov, ki identifikator uporabljajo/referencirajo.
-3. **Temporal analysis:** Primerjava datumov in presoja, ali je mogoče dokazati »prvič uporabljen«.
-4. **Reporting and validation:** Zapis dokazov, preverjanje skladnosti in končno poročilo.
+1. Setup project structure and rendering window
+2. Implement unit entity and state management
+3. Implement unit selection mechanics
+4. Implement unit movement mechanics
+5. Implement unit attack mechanics
+6. Implement simple AI for opponent units
+7. UI polish and testing
 
 ## Step Tracker
-## Step Tracker
-### STEP-001 — Poišči in identificiraj `DGSFPS005001`
-- **Execution:** DONE
-- **Validation:** PASSED
-- **Evidence:** Katalog `najdiAsset` je vrnil `status=OK`, `totalMatches=1`, `ambiguous=false`. Najden je artefakt `_DGSFPS005001Rest`, tip `EXTERNALSERVICE` / `External service`, `poId=1.9b5396b6-2f3f-41ca-b8df-a846cd50da91`, `modifiedOn=1773423510860`, `modifiedBy=Z35408`. Oznake/tags niso bile vrnjene.
 
-### STEP-002 — Pridobi where-used za enolični artefakt
-- **Execution:** DONE
-- **Validation:** PASSED
-- **Evidence:** `getAssetWhereUsed` je bil poklican z dobesedno vrnjenim `poId`. Vrnil je 5 referenc v snapshotu `Main`; `artifactsLastUsed=[]`.
+### STEP-001 — Setup project structure and rendering window
+- **Execution:** NOT_STARTED
+- **Validation:** PENDING
+- **Requirements:** REQ-004
+- **Dependencies:** None
+- **Objective:** Have a running Java application window with a visible 2D map grid.
+- **Actions:** Initialize Java project, create main window, render basic grid.
+- **Artifacts:** Source files for main class and rendering.
+- **Acceptance criteria:** Window launches and displays a grid.
+- **Validation:** Verify application window and grid display.
+- **Evidence:** Pending.
+- **Notes:** None.
 
-### STEP-003 — Določi najzgodnejši dokazljivi čas uporabe
-- **Execution:** DONE_WITH_LIMITATIONS
-- **Validation:** PASSED
-- **Evidence:** Za vseh 5 referenc je razpoložljiv `snapshotCreatedOn=2019-10-28T08:21:17.000Z`; to je datum nastanka snapshot-a, ne dokaz datuma prve uporabe. Katalog ne vrne datuma prve reference/uporabe.
+### STEP-002 — Implement unit entity and state management
+- **Execution:** NOT_STARTED
+- **Validation:** PENDING
+- **Requirements:** REQ-001, REQ-002, REQ-003
+- **Dependencies:** STEP-001
+- **Objective:** Create unit classes that can track health, position, selection state.
+- **Actions:** Define unit class; implement health, position, state.
+- **Artifacts:** Unit Java classes.
+- **Acceptance criteria:** Units can be instantiated and hold state.
+- **Validation:** Code review and instantiation tests.
+- **Evidence:** Pending.
+- **Notes:** None.
 
-### STEP-004 — Zapiši in preveri ugotovitev
-- **Execution:** DONE_WITH_LIMITATIONS
-- **Validation:** PASSED
-- **Evidence:** Končna ugotovitev jasno loči dokazano prvo uporabo od najzgodnejšega razpoložljivega časovnega podatka.
+### STEP-003 — Implement unit selection mechanics
+- **Execution:** NOT_STARTED
+- **Validation:** PENDING
+- **Requirements:** REQ-001
+- **Dependencies:** STEP-002
+- **Objective:** Allow user to select one or multiple units via mouse.
+- **Actions:** Handle mouse events, select units, update selection state and visuals.
+- **Artifacts:** Selection code and UI feedback.
+- **Acceptance criteria:** User can select units; selection visibly indicated.
+- **Validation:** Manual click and drag test.
+- **Evidence:** Pending.
+- **Notes:** None.
+
+### STEP-004 — Implement unit movement mechanics
+- **Execution:** NOT_STARTED
+- **Validation:** PENDING
+- **Requirements:** REQ-002
+- **Dependencies:** STEP-003
+- **Objective:** Enable moving selected units on the grid.
+- **Actions:** Input target cell, animate or update position.
+- **Artifacts:** Movement logic and UI updates.
+- **Acceptance criteria:** Units move to target location as commanded.
+- **Validation:** Movement test cases.
+- **Evidence:** Pending.
+- **Notes:** None.
+
+### STEP-005 — Implement unit attack mechanics
+- **Execution:** NOT_STARTED
+- **Validation:** PENDING
+- **Requirements:** REQ-003
+- **Dependencies:** STEP-004
+- **Objective:** Allow selected units to attack opponent units within range.
+- **Actions:** Implement attack detection, health decrement, unit death.
+- **Artifacts:** Attack logic and health management.
+- **Acceptance criteria:** Units can attack and remove opponent units.
+- **Validation:** Combat test cases.
+- **Evidence:** Pending.
+- **Notes:** None.
+
+### STEP-006 — Implement simple AI for opponent units
+- **Execution:** NOT_STARTED
+- **Validation:** PENDING
+- **Requirements:** REQ-005
+- **Dependencies:** STEP-005
+- **Objective:** Provide basic AI controlling opponent unit movement and attacks.
+- **Actions:** Simple rule-based AI to move and attack.
+- **Artifacts:** AI logic code.
+- **Acceptance criteria:** Opponent units take valid actions.
+- **Validation:** AI behavior test.
+- **Evidence:** Pending.
+- **Notes:** None.
+
+### STEP-007 — UI polish and testing
+- **Execution:** NOT_STARTED
+- **Validation:** PENDING
+- **Requirements:** None
+- **Dependencies:** STEP-006
+- **Objective:** Provide UI improvements and test the game's mechanics fully.
+- **Actions:** Fix bugs, improve visuals, run gameplay tests.
+- **Artifacts:** Final working game build.
+- **Acceptance criteria:** Game runs smoothly and correctly.
+- **Validation:** User acceptance testing.
+- **Evidence:** Pending.
+- **Notes:** None.
 
 ## Validation Matrix
-| Requirement | Validation method | Expected evidence | Status |
-|---|---|---|---|
-| REQ-001 | Katalogsko iskanje | Status, zadetki, tip in identiteta | PENDING |
-| REQ-002 | Where-used klic | Referenčni artefakti ali prazen seznam | PENDING |
-| REQ-003 | Časovna primerjava | Najzgodnejši datum z razlago pomena | PENDING |
-| REQ-004 | Pregled interpretacije | Jasno navedene omejitve | PENDING |
-| REQ-005 | Pregled evidence loga | Reproducibilen zapis virov | PENDING |
+- Each step must be executed completely and validated before proceeding to dependent steps.
 
 ## Dependencies
-- Dostop do kataloga UDG Toolkit 2.
-- Enolična identifikacija artefakta, če je where-used analiza potrebna.
-- Časovni metadata ali zgodovina za zanesljiv odgovor o prvi uporabi.
+- Later steps depend on earlier setup, e.g., selection depends on unit management.
 
 ## Risks
-- Identifikator se lahko pojavlja kot besedilo v več nepovezanih artefaktih.
-- Katalogski snapshot morda nima zgodovine ali datuma nastanka.
-- Datum zadnje spremembe lahko vodi do napačnega sklepa o prvi uporabi.
-- Več zadetkov lahko zahteva dodatno uporabniško razločitev in prepreči dokončen odgovor v eni izvedbi.
+- Potential complexity in handling user input and real-time updates.
+- Balancing AI simplicity and challenge.
 
 ## Blockers
-- Trenutno ni zaznanih tehničnih blockerjev.
-- Morebitna odsotnost zgodovinskih datumov bo vsebinska omejitev, ne napaka izvedbe.
+- None identified yet.
 
 ## Deviations
-- None.
+- None currently.
 
 ## Evidence Log
-- **E-001:** Začetni pregled workspace-a: `PLAN.md` ni obstajal; projektnih datotek in git repozitorija ni bilo najdenih. Datum: 2026-09-08.
-- Nadaljnji dokazi: Pending execution.
+- To be filled during development.
 
 ## Change Log
-- 2026-09-08 — Ustvarjen začetni načrt za ugotovitev prve uporabe `DGSFPS005001`.
+- Initial plan creation.
 
 ## Final Acceptance Checklist
-- [ ] Identifikator je bil preverjen v katalogu.
-- [ ] Enolični artefakt je identificiran ali je neenoličnost dokumentirana.
-- [ ] Where-used je bil preverjen, kadar je bilo to dovoljeno in mogoče.
-- [ ] Najzgodnejši datum je podprt z virom in pravilno semantiko.
-- [ ] Omejitve zgodovine/snapshot-a so navedene.
-- [ ] Vsi aktivni koraki imajo `DONE` in `PASSED`/`NOT_REQUIRED`.
-- [ ] Ni odprtih kritičnih blockerjev.
+- All core features (selection, movement, attack) implemented and validated.
+- Game UI functional and responsive.
+- Opponent units behave reasonably.
 
 ## Final Assessment
-- **Result:** INCOMPLETE
-- **Reason:** Načrt je pripravljen, katalogska izvedba in validacija pa še nista opravljeni.
+- Pending development and validation.

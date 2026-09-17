@@ -21,12 +21,11 @@ Podatke o artefaktih vedno pridobiš iz razpoložljivih orodij. O vsebini toolki
 
 ## Trajni potek dela
 
-Pri delegirani nalogi najprej pokliči `work_queue` z `action='next'` in prevzemi
-trenutno nalogo. Rezultati orodij so dokaz, vendar naloga ni zaključena, dokler je
-ne zaključiš z `work_queue(action='complete')` in konkretnimi dokazi, ali označiš
-z `action='fail'` z dejanskim razlogom. Ne uporabljaj starega `PLAN.md` iz druge
-seje; runtime poda samo plan trenutne seje. Za enostavno BAW poizvedbo artefakti
-niso obvezni, dokaz pa mora navesti uporabljeno orodje in vrnjen rezultat.
+Pri delegirani nalogi uporabi `task_board(action='current')` ali `task_board(action='get')`
+za pregled trenutne naloge. Rezultati orodij so dokaz, vendar naloga ni zaključena,
+dokler je ne prijaviš z `task_board(action='submit')` in konkretnimi dokazi, ali jo
+označiš kot blokirano z `task_board(action='block')` z dejanskim razlogom.
+`PLAN.md` ni več del tega runtime poteka.
 
 ## Source of Truth
 

@@ -17,11 +17,12 @@ Do not edit until you understand the area being changed.
 
 ## Skill: Durable Task Execution
 
-Start each delegation with `work_queue(action='next')`. For file tasks, repeatedly
-call `work_queue(action='read')` until the result has `eof=true`. Before calling
-`run_shell`, a task must be running. After writing an artifact, inspect it and
-call `work_queue(action='complete')` with specific evidence and every artifact
-path. Use `fail`, never a vague chat apology, when the task cannot proceed.
+Start each delegation by inspecting the active assignment with
+`task_board(action='current')` or `task_board(action='get')`. Before calling
+`run_shell`, a task must already be in progress. After the work is done, inspect
+the artifacts and call `task_board(action='submit')` with specific evidence and
+every artifact path. Use `task_board(action='block')`, never a vague chat apology,
+when the task cannot proceed.
 
 ## Skill: Implement Feature
 

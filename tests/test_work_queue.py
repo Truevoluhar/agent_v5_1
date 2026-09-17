@@ -1,133 +1,194 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from agent.work_queue import WorkQueue
 from agent.tools.tools_registry import execute_registered_tool
+from agent.work_queue import TaskBoard
 
 
-class WorkQueueTests(unittest.TestCase):
+class TaskBoardTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.queue = WorkQueue(self.root, 'session')
+        self.board = TaskBoard(self.root, "session")
 
-    def test_objective_and_workspace_lock_survive_reopening(self):
-        from agent.execution import workspace_lock
-        self.assertEqual(self.queue.objective('Document all sources'), 'Document all sources')
-        self.assertIn('Document all sources', WorkQueue(self.root, 'session').objective('Continue'))
-        with workspace_lock(self.root):
-            with self.assertRaises(RuntimeError):
-                with workspace_lock(self.root):
-                    pass
-        with workspace_lock(self.root):
-            pass
+    def test_objective_and_task_creation_survive_reopening(self):
+        self.assertEqual(self.board.objective("Ship the feature"), "Ship the feature")
+        created = self.board.add_tasks(
+            [
+                {
+                    "task_key": "TASK-ANALYZE",
+                    "title": "Analyze the repo",
+                    "description": "Inspect the current implementation.",
+                    "task_type": "analysis",
+                    "priority": 10,
+                }
+            ]
+        )
+        reopened = TaskBoard(self.root, "session")
+        self.assertEqual(reopened.total_tasks(), 1)
+        self.assertEqual(reopened.next_ready()["task_key"], "TASK-ANALYZE")
+        self.assertEqual(created[0]["task_key"], "TASK-ANALYZE")
 
-    def test_completion_report_contains_verified_output_paths(self):
-        import json
-        (self.root / 'source.py').write_text('value = 1')
-        self.queue.inventory('.', '*.py', 'document')
-        task = self.queue.claim()
-        self.queue.read(task['id'])
-        (self.root / 'actual.md').write_text('value is one')
-        self.queue.finish(task['id'], 'Read source and checked output', ['actual.md'])
-        report = self.queue.completion_report()
-        self.assertEqual(report['artifact_paths'], ['actual.md'])
-        self.assertEqual(report['completed_tasks'], 1)
-        saved = json.loads((self.root / report['full_report']).read_text())
-        self.assertEqual(saved[0]['source'], 'source.py')
-        self.assertEqual(saved[0]['artifacts'][0]['path'], 'actual.md')
+    def test_dependencies_control_when_tasks_become_ready(self):
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "TASK-1",
+                    "title": "Inspect",
+                    "description": "Inspect",
+                    "task_type": "analysis",
+                    "priority": 10,
+                },
+                {
+                    "task_key": "TASK-2",
+                    "title": "Implement",
+                    "description": "Implement",
+                    "task_type": "implementation",
+                    "priority": 20,
+                    "depends_on_keys": ["TASK-1"],
+                },
+            ]
+        )
+        first = self.board.next_ready()
+        self.assertEqual(first["task_key"], "TASK-1")
+        self.board.begin_task(first["id"], "PLANNER", "Inspect")
+        self.board.submit(first["id"], summary="done", evidence="checked repo", artifacts=[])
+        self.board.validate(first["id"], accepted=True, validation_notes="Looks good")
+        second = self.board.next_ready()
+        self.assertEqual(second["task_key"], "TASK-2")
 
-    def test_thousand_files_resume_and_verify_exact_coverage(self):
-        source = self.root / 'src'
-        source.mkdir()
-        for n in range(1000):
-            (source / f'{n}.py').write_text(f'def f{n}(): return {n}\n')
-        self.assertEqual(self.queue.inventory('src', '*.py', 'Document each file')['added'], 1000)
-        self.assertEqual(self.queue.inventory('src', '*.py', 'Document each file')['added'], 0)
-        output = self.root / 'docs'
-        output.mkdir()
-        for n in range(1000):
-            task = self.queue.claim()
-            if n == 500:
-                self.queue = WorkQueue(self.root, 'session')
-                self.assertEqual(self.queue.claim()['id'], task['id'])
-            self.assertTrue(self.queue.read(task['id'])['eof'])
-            artifact = f'docs/{task["id"]}.md'
-            (self.root / artifact).write_text(f'Documentation for {task["source"]}')
-            self.queue.finish(task['id'], 'Checked source and output', [artifact])
-        state = self.queue.verify()
-        self.assertEqual(state['counts'], {'completed': 1000})
-        self.assertEqual(state['remaining'], 0)
-        self.assertIsNone(self.queue.claim())
-        (self.root / 'docs/1.md').unlink()
-        self.assertEqual(self.queue.verify()['remaining'], 1)
+    def test_submit_validate_and_completion_report(self):
+        artifact = self.root / "notes.md"
+        artifact.write_text("verified", encoding="utf-8")
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "TASK-VERIFY",
+                    "title": "Verify",
+                    "description": "Verify",
+                    "task_type": "verification",
+                    "priority": 5,
+                }
+            ]
+        )
+        task = self.board.next_ready()
+        self.board.begin_task(task["id"], "PROGRAMMER", "Verify it")
+        self.board.submit(
+            task["id"],
+            summary="verified",
+            evidence="Read the file and confirmed it exists",
+            artifacts=["notes.md"],
+        )
+        self.board.validate(task["id"], accepted=True, validation_notes="Accepted")
+        report = self.board.completion_report()
+        self.assertEqual(report["validated_tasks"], 1)
+        self.assertEqual(report["artifact_paths"], ["notes.md"])
+        saved = json.loads((self.root / report["full_report"]).read_text(encoding="utf-8"))
+        self.assertEqual(saved[0]["task_key"], "TASK-VERIFY")
 
-    def test_requires_full_read_artifact_and_unchanged_source(self):
-        (self.root / 'a.py').write_text('x' * 20000)
-        self.queue.inventory('.', '*.py', 'document')
-        task = self.queue.claim()
-        (self.root / 'a.md').write_text('doc')
-        self.queue.read(task['id'])
-        with self.assertRaises(ValueError):
-            self.queue.finish(task['id'], 'checked', ['a.md'])
-        while not self.queue.read(task['id'])['eof']:
-            pass
-        with self.assertRaises(ValueError):
-            self.queue.finish(task['id'], 'checked', [])
-        (self.root / 'a.py').write_text('changed')
-        with self.assertRaises(ValueError):
-            self.queue.finish(task['id'], 'checked', ['a.md'])
-        self.queue.refresh(task['id'])
-        self.queue.claim()
-        self.assertEqual(self.queue.read(task['id'])['content'], 'changed')
-        self.queue.finish(task['id'], 'checked', ['a.md'])
+    def test_verify_invalidates_changed_artifacts(self):
+        artifact = self.root / "result.txt"
+        artifact.write_text("v1", encoding="utf-8")
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "TASK-RESULT",
+                    "title": "Result",
+                    "description": "Generate result",
+                    "task_type": "implementation",
+                    "priority": 1,
+                }
+            ]
+        )
+        task = self.board.next_ready()
+        self.board.begin_task(task["id"], "PROGRAMMER", "Do the work")
+        self.board.submit(
+            task["id"],
+            summary="done",
+            evidence="Generated the file",
+            artifacts=["result.txt"],
+        )
+        self.board.validate(task["id"], accepted=True, validation_notes="Accepted")
+        artifact.write_text("v2", encoding="utf-8")
+        state = self.board.verify()
+        self.assertEqual(state["invalidated"], [task["id"]])
+        self.assertEqual(self.board.get_task(task_id=task["id"])["status"], "blocked")
 
-    def test_failure_retry_limit_and_session_isolation(self):
-        self.queue.add('Implement and test')
-        for i in range(3):
-            task = self.queue.claim()
-            self.assertEqual(task['attempts'], i + 1)
-            self.queue.fail(task['id'], 'test failed')
-        self.assertIsNone(self.queue.claim())
-        self.assertEqual(self.queue.summary()['remaining'], 1)
-        self.assertEqual(WorkQueue(self.root, 'other-session').summary()['total'], 0)
-
-    def test_shell_requires_a_claimed_durable_task(self):
+    def test_shell_requires_a_running_task(self):
         refused = execute_registered_tool(
-            workspace=str(self.root), tool_name='run_shell',
-            tool_input={'command': 'printf blocked > blocked.txt', 'cwd': '.', 'timeout': 5, 'background': False},
-            scope='session',
+            workspace=str(self.root),
+            tool_name="run_shell",
+            tool_input={"command": "printf blocked > blocked.txt", "cwd": ".", "timeout": 5, "background": False},
+            scope="session",
         )
-        self.assertFalse(refused['ok'])
-        self.assertFalse((self.root / 'blocked.txt').exists())
-        self.assertIn("work_queue", refused['error'])
+        self.assertFalse(refused["ok"])
+        self.assertFalse((self.root / "blocked.txt").exists())
 
-        self.queue.add('Create the evidence file')
-        self.queue.claim()
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "TASK-SHELL",
+                    "title": "Shell",
+                    "description": "Create a file",
+                    "task_type": "implementation",
+                    "priority": 1,
+                }
+            ]
+        )
+        task = self.board.next_ready()
+        self.board.begin_task(task["id"], "PROGRAMMER", "Create the file")
         result = execute_registered_tool(
-            workspace=str(self.root), tool_name='run_shell',
-            tool_input={'command': 'printf recorded > evidence.txt', 'cwd': '.', 'timeout': 5, 'background': False},
-            scope='session',
+            workspace=str(self.root),
+            tool_name="run_shell",
+            tool_input={"command": "printf recorded > evidence.txt", "cwd": ".", "timeout": 5, "background": False},
+            scope="session",
         )
-        self.assertTrue(result['ok'])
-        self.assertEqual((self.root / 'evidence.txt').read_text(), 'recorded')
+        self.assertTrue(result["ok"])
+        self.assertEqual((self.root / "evidence.txt").read_text(encoding="utf-8"), "recorded")
 
-    def test_paths_cannot_escape_and_unicode_chunk_boundaries(self):
-        with self.assertRaises(ValueError):
-            self.queue.inventory('../', '*', 'bad')
-        (self.root / 'a.py').write_text('é' * 8001, encoding='utf-8')
-        self.queue.inventory('.', '*.py', 'read')
-        task = self.queue.claim()
-        content = ''
-        while True:
-            chunk = self.queue.read(task['id'], max_chars=7999)
-            content += chunk['content']
-            if chunk['eof']:
-                break
-        self.assertEqual(content, 'é' * 8001)
+    def test_task_board_tool_exposes_current_and_submit(self):
+        artifact = self.root / "out.txt"
+        artifact.write_text("done", encoding="utf-8")
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "TASK-TOOL",
+                    "title": "Tool",
+                    "description": "Use the tool API",
+                    "task_type": "implementation",
+                    "priority": 1,
+                }
+            ]
+        )
+        task = self.board.next_ready()
+        self.board.begin_task(task["id"], "PROGRAMMER", "Use task_board")
+        current = execute_registered_tool(
+            workspace=str(self.root),
+            tool_name="task_board",
+            tool_input={"action": "current"},
+            scope="session",
+        )
+        self.assertTrue(current["ok"])
+        self.assertIn("TASK-TOOL", current["output"])
+
+        submitted = execute_registered_tool(
+            workspace=str(self.root),
+            tool_name="task_board",
+            tool_input={
+                "action": "submit",
+                "task_id": task["id"],
+                "summary": "done",
+                "evidence": "Created out.txt",
+                "artifacts": ["out.txt"],
+            },
+            scope="session",
+        )
+        self.assertTrue(submitted["ok"])
+        self.assertEqual(self.board.get_task(task_id=task["id"])["status"], "reported")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
