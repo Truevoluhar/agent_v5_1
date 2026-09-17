@@ -58,6 +58,57 @@ def _find_agent_by_name(agents: list[GenericAgent], agent_name: str) -> GenericA
     return None
 
 
+def _looks_like_placeholder_instruction(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        return True
+    if len(normalized) < 24:
+        return True
+    placeholders = {
+        "delegate next task",
+        "do the work",
+        "continue",
+        "resume",
+        "handle it",
+        "work on it",
+        "next task",
+    }
+    return normalized in placeholders
+
+
+def _build_delegation_instructions(task: dict[str, Any], description: str) -> str:
+    cleaned_description = " ".join(str(description or "").split())
+    instructions: list[str] = []
+    if cleaned_description and not _looks_like_placeholder_instruction(cleaned_description):
+        instructions.append(cleaned_description)
+    else:
+        instructions.append(f"Complete task {task['task_key']}: {task['title']}.")
+    if task.get("source_path"):
+        instructions.append(f"Analyze source file '{task['source_path']}'.")
+    if task.get("description"):
+        instructions.append(str(task["description"]).strip())
+    acceptance = [item.strip() for item in (task.get("acceptance_criteria") or []) if str(item).strip()]
+    if acceptance:
+        instructions.append("Acceptance criteria: " + "; ".join(acceptance))
+    instructions.append(
+        "Save files before reporting, then call task_board(action='submit') with exact artifact paths. "
+        "If completion is impossible, call task_board(action='block') with the real blocker."
+    )
+    return " ".join(part for part in instructions if part)
+
+
+def _recommended_step_budget(base_max_steps: int, board_summary: dict[str, Any]) -> int:
+    counts = dict(board_summary.get("counts") or {})
+    remaining = int(board_summary.get("remaining") or 0)
+    review_queue = int(counts.get("reported", 0)) + int(counts.get("blocked", 0))
+    active = int(counts.get("in_progress", 0))
+    if remaining <= 0:
+        return base_max_steps
+    # A successful task typically needs one delegation step and one review step.
+    recommended = (remaining * 2) + review_queue + active + 4
+    return max(base_max_steps, recommended)
+
+
 def _finalize_completed_work(
     *,
     board: TaskBoard,
@@ -466,243 +517,250 @@ class AgentRunner:
         )
         objective = board.objective(str(objective))
 
-        for step in range(config["max_steps"]):
-            if is_cancelled():
-                raise RunCancelled()
+        step = 0
+        max_steps = int(config["max_steps"])
+        while step < max_steps:
+            try:
+                if is_cancelled():
+                    raise RunCancelled()
 
-            emitter.emit("step.started", {"step": step})
-            self._ensure_tasks_planned(
-                board=board,
-                session=session,
-                objective=objective,
-                orchestrator_agent=orchestrator_agent,
-                emitter=emitter,
-                context_budget=orchestrator_context_budget,
-            )
-
-            coverage = board.verify()
-            emitter.emit("work.coverage", coverage)
-            if coverage["remaining"] == 0 and board.has_tasks():
-                finalized, final_response = _finalize_completed_work(
-                    board=board,
-                    response_agent=response_agent,
-                    session=session,
-                    response_context_budget=response_context_budget,
-                    response_schema_source=response_schema_source,
-                    emitter=emitter,
-                    is_cancelled=is_cancelled,
-                    completion_note=(
-                        "Summarize the completed work in the required JSON structure. "
-                        "Use the validated task board report as evidence. "
-                        "Never invent filenames or claim work was tested without evidence."
-                    ),
-                )
-                if finalized:
-                    return final_response
-
-            if board.list_tasks(statuses=["reported", "blocked"], limit=1):
-                self._review_reported_task(
+                emitter.emit("step.started", {"step": step})
+                self._ensure_tasks_planned(
                     board=board,
                     session=session,
                     objective=objective,
                     orchestrator_agent=orchestrator_agent,
                     emitter=emitter,
-                    wait_for_input=wait_for_input,
-                    is_cancelled=is_cancelled,
                     context_budget=orchestrator_context_budget,
                 )
-                objective = board.objective("")
-                continue
+                max_steps = _recommended_step_budget(max_steps, board.summary())
 
-            ready_tasks = board.list_tasks(statuses=["ready"], limit=6)
-            if not ready_tasks:
-                session.add_message(
+                coverage = board.verify()
+                emitter.emit("work.coverage", coverage)
+                if coverage["remaining"] == 0 and board.has_tasks():
+                    finalized, final_response = _finalize_completed_work(
+                        board=board,
+                        response_agent=response_agent,
+                        session=session,
+                        response_context_budget=response_context_budget,
+                        response_schema_source=response_schema_source,
+                        emitter=emitter,
+                        is_cancelled=is_cancelled,
+                        completion_note=(
+                            "Summarize the completed work in the required JSON structure. "
+                            "Use the validated task board report as evidence. "
+                            "Never invent filenames or claim work was tested without evidence."
+                        ),
+                    )
+                    if finalized:
+                        return final_response
+
+                if board.list_tasks(statuses=["reported", "blocked"], limit=1):
+                    self._review_reported_task(
+                        board=board,
+                        session=session,
+                        objective=objective,
+                        orchestrator_agent=orchestrator_agent,
+                        emitter=emitter,
+                        wait_for_input=wait_for_input,
+                        is_cancelled=is_cancelled,
+                        context_budget=orchestrator_context_budget,
+                    )
+                    objective = board.objective("")
+                    continue
+
+                ready_tasks = board.list_tasks(statuses=["ready"], limit=6)
+                if not ready_tasks:
+                    session.add_message(
+                        {
+                            "role": "user",
+                            "content": (
+                                "No ready tasks are available, but the task board is not finished. "
+                                "Resolve blocked tasks or ask the user for clarification."
+                            ),
+                        }
+                    )
+                    objective = board.objective("")
+                    continue
+
+                orchestration_messages = session.get_bounded_context(
+                    max_recent_messages=12,
+                    max_context_chars=orchestrator_context_budget,
+                )
+                retrieval_context = self._build_retrieval_context(session, objective, orchestrator_context_budget)
+                if retrieval_context:
+                    orchestration_messages.insert(0, {"role": "system", "content": retrieval_context})
+                orchestration_messages.append(
                     {
                         "role": "user",
                         "content": (
-                            "No ready tasks are available, but the task board is not finished. "
-                            "Resolve blocked tasks or ask the user for clarification."
+                            EXECUTION_POLICY
+                            + "\nCurrent objective: "
+                            + objective
+                            + "\nTask board summary: "
+                            + json.dumps(board.summary(), ensure_ascii=False)
+                            + "\nReady tasks: "
+                            + json.dumps(ready_tasks, ensure_ascii=False)
+                            + "\nChoose the best next task and the best available agent for it."
                         ),
                     }
                 )
-                objective = board.objective("")
-                continue
-
-            orchestration_messages = session.get_bounded_context(
-                max_recent_messages=12,
-                max_context_chars=orchestrator_context_budget,
-            )
-            retrieval_context = self._build_retrieval_context(session, objective, orchestrator_context_budget)
-            if retrieval_context:
-                orchestration_messages.insert(0, {"role": "system", "content": retrieval_context})
-            orchestration_messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        EXECUTION_POLICY
-                        + "\nCurrent objective: "
-                        + objective
-                        + "\nTask board summary: "
-                        + json.dumps(board.summary(), ensure_ascii=False)
-                        + "\nReady tasks: "
-                        + json.dumps(ready_tasks, ensure_ascii=False)
-                        + "\nChoose the best next task and the best available agent for it."
-                    ),
-                }
-            )
-            emitter.emit("orchestrator.started", {"step": step, "mode": "dispatch"})
-            decision = orchestrator_agent.decide_next_action(orchestration_messages)
-            emitter.emit(
-                "orchestrator.decision",
-                {"action": decision.action, "description": decision.description, "task_key": decision.task_key},
-            )
-            session.add_message({"role": "assistant", "content": decision.description})
-
-            if decision.action == "ask_user":
-                emitter.emit("input.required", {"question": decision.description})
-                user_response = wait_for_input(decision.description)
-                if is_cancelled():
-                    raise RunCancelled()
-                session.add_message({"role": "user", "content": user_response})
-                objective = board.objective(user_response)
-                continue
-
-            if decision.action == "finish":
-                finalized, final_response = _finalize_completed_work(
-                    board=board,
-                    response_agent=response_agent,
-                    session=session,
-                    response_context_budget=response_context_budget,
-                    response_schema_source=response_schema_source,
-                    emitter=emitter,
-                    is_cancelled=is_cancelled,
-                    completion_note=(
-                        "Summarize the completed work in the required JSON structure. "
-                        "Use the validated task board report as evidence. "
-                        "Never invent filenames or claim work was tested without evidence."
-                    ),
+                emitter.emit("orchestrator.started", {"step": step, "mode": "dispatch"})
+                decision = orchestrator_agent.decide_next_action(orchestration_messages)
+                emitter.emit(
+                    "orchestrator.decision",
+                    {"action": decision.action, "description": decision.description, "task_key": decision.task_key},
                 )
-                if finalized:
-                    return final_response
-                session.add_message(
-                    {
-                        "role": "user",
-                        "content": "Finish rejected because the task board still has open work. Continue orchestration.",
-                    }
+                session.add_message({"role": "assistant", "content": decision.description})
+
+                if decision.action == "ask_user":
+                    emitter.emit("input.required", {"question": decision.description})
+                    user_response = wait_for_input(decision.description)
+                    if is_cancelled():
+                        raise RunCancelled()
+                    session.add_message({"role": "user", "content": user_response})
+                    objective = board.objective(user_response)
+                    continue
+
+                if decision.action == "finish":
+                    finalized, final_response = _finalize_completed_work(
+                        board=board,
+                        response_agent=response_agent,
+                        session=session,
+                        response_context_budget=response_context_budget,
+                        response_schema_source=response_schema_source,
+                        emitter=emitter,
+                        is_cancelled=is_cancelled,
+                        completion_note=(
+                            "Summarize the completed work in the required JSON structure. "
+                            "Use the validated task board report as evidence. "
+                            "Never invent filenames or claim work was tested without evidence."
+                        ),
+                    )
+                    if finalized:
+                        return final_response
+                    session.add_message(
+                        {
+                            "role": "user",
+                            "content": "Finish rejected because the task board still has open work. Continue orchestration.",
+                        }
+                    )
+                    objective = board.objective("")
+                    continue
+
+                delegated_agent = _find_agent_by_name(agents, decision.agent_name)
+                if delegated_agent is None:
+                    session.add_message(
+                        {
+                            "role": "user",
+                            "content": f"Delegation rejected because agent {decision.agent_name} is unavailable.",
+                        }
+                    )
+                    continue
+
+                task = board.get_task(task_key=decision.task_key) or board.next_ready()
+                if task is None or task["status"] != "ready":
+                    session.add_message(
+                        {
+                            "role": "user",
+                            "content": "Delegation rejected because the chosen task is not ready anymore. Pick another ready task.",
+                        }
+                    )
+                    continue
+
+                delegation_instructions = _build_delegation_instructions(task, decision.description)
+                task = board.begin_task(task["id"], delegated_agent.name, delegation_instructions)
+                emitter.emit(
+                    "agent.delegated",
+                    {"agent": delegated_agent.name, "task_id": task["id"], "task_key": task["task_key"]},
                 )
-                objective = board.objective("")
-                continue
-
-            delegated_agent = _find_agent_by_name(agents, decision.agent_name)
-            if delegated_agent is None:
-                session.add_message(
-                    {
-                        "role": "user",
-                        "content": f"Delegation rejected because agent {decision.agent_name} is unavailable.",
-                    }
-                )
-                continue
-
-            task = board.get_task(task_key=decision.task_key) or board.next_ready()
-            if task is None or task["status"] != "ready":
-                session.add_message(
-                    {
-                        "role": "user",
-                        "content": "Delegation rejected because the chosen task is not ready anymore. Pick another ready task.",
-                    }
-                )
-                continue
-
-            task = board.begin_task(task["id"], delegated_agent.name, decision.description)
-            emitter.emit(
-                "agent.delegated",
-                {"agent": delegated_agent.name, "task_id": task["id"], "task_key": task["task_key"]},
-            )
-            session.add_message(
-                {
-                    "role": "assistant",
-                    "content": f"Delegated {task['task_key']} to {delegated_agent.name}: {decision.description}",
-                }
-            )
-
-            agent_messages = session.get_bounded_context(
-                max_recent_messages=12,
-                max_context_chars=delegated_context_budget,
-            )
-            worker_query = " ".join(
-                part for part in [task.get("title", ""), task.get("description", ""), decision.description] if part
-            )
-            worker_retrieval = self._build_retrieval_context(session, worker_query, delegated_context_budget)
-            if worker_retrieval:
-                agent_messages.insert(0, {"role": "system", "content": worker_retrieval})
-            agent_messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        EXECUTION_POLICY
-                        + "\nCurrent objective: "
-                        + objective
-                        + "\nCurrent delegated task: "
-                        + json.dumps(task, ensure_ascii=False)
-                        + "\nTask board summary: "
-                        + json.dumps(board.summary(), ensure_ascii=False)
-                        + "\nComplete only this task. Use task_board(action='current' or 'get') to inspect it. "
-                        + "When the work is done, report back with task_board(action='submit') including a concise summary, concrete evidence, and exact artifact paths. "
-                        + "If you are blocked, use task_board(action='block') with the real reason."
-                    ),
-                }
-            )
-
-            try:
-                delegated_agent.chat(
-                    agent_messages,
-                    session,
-                    emit=lambda event_type, data: emitter.emit(event_type, data),
-                    is_cancelled=is_cancelled,
-                    max_iterations=int(config.get("max_worker_iterations", 100)),
-                )
-            except BudgetExhausted:
-                emitter.emit("agent.yielded", {"agent": delegated_agent.name, "reason": "iteration_budget"})
                 session.add_message(
                     {
                         "role": "assistant",
+                        "content": f"Delegated {task['task_key']} to {delegated_agent.name}: {delegation_instructions}",
+                    }
+                )
+
+                agent_messages = session.get_bounded_context(
+                    max_recent_messages=12,
+                    max_context_chars=delegated_context_budget,
+                )
+                worker_query = " ".join(
+                    part for part in [task.get("title", ""), task.get("description", ""), delegation_instructions] if part
+                )
+                worker_retrieval = self._build_retrieval_context(session, worker_query, delegated_context_budget)
+                if worker_retrieval:
+                    agent_messages.insert(0, {"role": "system", "content": worker_retrieval})
+                agent_messages.append(
+                    {
+                        "role": "user",
                         "content": (
-                            f"Worker batch for {task['task_key']} ended before a final report. "
-                            "Resume from task_board state and archived tool results."
+                            EXECUTION_POLICY
+                            + "\nCurrent objective: "
+                            + objective
+                            + "\nCurrent delegated task: "
+                            + json.dumps(task, ensure_ascii=False)
+                            + "\nTask board summary: "
+                            + json.dumps(board.summary(), ensure_ascii=False)
+                            + "\nComplete only this task. Use task_board(action='current' or 'get') to inspect it. "
+                            + "When the work is done, report back with task_board(action='submit') including a concise summary, concrete evidence, and exact artifact paths. "
+                            + "If you are blocked, use task_board(action='block') with the real reason."
                         ),
                     }
                 )
 
-            task_after = board.get_task(task_id=task["id"])
-            if task_after is not None and task_after["status"] == "in_progress":
-                board.block(
-                    task["id"],
-                    "Worker returned control without submitting a task report.",
-                    delegated_agent.name,
-                )
+                try:
+                    delegated_agent.chat(
+                        agent_messages,
+                        session,
+                        emit=lambda event_type, data: emitter.emit(event_type, data),
+                        is_cancelled=is_cancelled,
+                        max_iterations=int(config.get("max_worker_iterations", 100)),
+                    )
+                except BudgetExhausted:
+                    emitter.emit("agent.yielded", {"agent": delegated_agent.name, "reason": "iteration_budget"})
+                    session.add_message(
+                        {
+                            "role": "assistant",
+                            "content": (
+                                f"Worker batch for {task['task_key']} ended before a final report. "
+                                "Resume from task_board state and archived tool results."
+                            ),
+                        }
+                    )
+
                 task_after = board.get_task(task_id=task["id"])
+                if task_after is not None and task_after["status"] == "in_progress":
+                    board.block(
+                        task["id"],
+                        "Worker returned control without submitting a task report.",
+                        delegated_agent.name,
+                    )
+                    task_after = board.get_task(task_id=task["id"])
 
-            if task_after is not None and task_after["status"] in {"reported", "blocked"}:
-                session.add_message(
+                if task_after is not None and task_after["status"] in {"reported", "blocked"}:
+                    session.add_message(
+                        {
+                            "role": "assistant",
+                            "content": (
+                                f"Task {task_after['task_key']} status={task_after['status']}. "
+                                f"Summary: {task_after.get('result_summary') or 'n/a'}. "
+                                f"Evidence: {task_after.get('evidence') or task_after.get('last_error') or 'n/a'}"
+                            ),
+                        }
+                    )
+
+                emitter.emit(
+                    "agent.batch.completed",
                     {
-                        "role": "assistant",
-                        "content": (
-                            f"Task {task_after['task_key']} status={task_after['status']}. "
-                            f"Summary: {task_after.get('result_summary') or 'n/a'}. "
-                            f"Evidence: {task_after.get('evidence') or task_after.get('last_error') or 'n/a'}"
-                        ),
-                    }
+                        "agent": delegated_agent.name,
+                        "task_id": task["id"],
+                        "task_status": task_after["status"] if task_after else "unknown",
+                        "remaining": board.summary()["remaining"],
+                    },
                 )
-
-            emitter.emit(
-                "agent.batch.completed",
-                {
-                    "agent": delegated_agent.name,
-                    "task_id": task["id"],
-                    "task_status": task_after["status"] if task_after else "unknown",
-                    "remaining": board.summary()["remaining"],
-                },
-            )
+            finally:
+                step += 1
 
         emitter.emit("run.force_finished", {"reason": "step_budget_reached", "max_steps": config["max_steps"]})
         if response_agent is not None:

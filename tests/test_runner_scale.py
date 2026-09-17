@@ -122,6 +122,38 @@ class RunnerScaleTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertEqual(board.summary()["remaining"], 0)
 
+    def test_step_budget_auto_scales_to_cover_delegate_and_review(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            board = TaskBoard(workspace, "test")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "TASK-1",
+                        "title": "Write README",
+                        "description": "Create the README file",
+                        "task_type": "implementation",
+                        "priority": 1,
+                    }
+                ]
+            )
+
+            def chat(*args, **kwargs):
+                task = board.get_task(task_key="TASK-1")
+                board.submit(task["id"], summary="done", evidence="created readme", artifacts=[])
+
+            worker = SimpleNamespace(name="WORKER", chat=chat)
+            decisions = [
+                SimpleNamespace(action="delegate_to_agent", agent_name="WORKER", task_key="TASK-1", description="Write the README"),
+                SimpleNamespace(action="finish", description="done", task_key=None, agent_name=None),
+            ]
+            orchestrator = SimpleNamespace(
+                plan_tasks=lambda messages: SimpleNamespace(summary="unused", tasks=[]),
+                decide_next_action=lambda messages: decisions.pop(0),
+                review_task=lambda messages: SimpleNamespace(outcome="accept", validation_notes="accepted", new_tasks=[]),
+            )
+            self.assertIsNone(self.run_loop(workspace, orchestrator, [worker], steps=1))
+            self.assertEqual(board.summary()["remaining"], 0)
+
     def test_delegation_passes_current_task_to_worker(self):
         with tempfile.TemporaryDirectory() as workspace:
             captured = []
@@ -159,6 +191,53 @@ class RunnerScaleTests(unittest.TestCase):
             self.assertIn("Implement the change", worker_prompt)
             self.assertIn("task_board(action='submit')", worker_prompt)
 
+    def test_delegation_instructions_are_hardened_when_orchestrator_is_vague(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            board = TaskBoard(workspace, "test")
+            source_dir = Path(workspace) / "extracted_documents"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            (source_dir / "ADGZ__ADGZ.txt").write_text("sample source", encoding="utf-8")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "TASK-README",
+                        "title": "README for extracted_documents/ADGZ__ADGZ.txt",
+                        "description": "Read and analyze a source file, then create a comprehensive README.md following the template format.",
+                        "task_type": "implementation",
+                        "priority": 1,
+                        "acceptance_criteria": [
+                            "README.md follows TEMPLATE_README.md format exactly",
+                            "README.md is placed in a folder named after the project",
+                        ],
+                        "source_path": "extracted_documents/ADGZ__ADGZ.txt",
+                    }
+                ]
+            )
+            seen = {}
+
+            def chat(*args, **kwargs):
+                current = board.active_task()
+                seen["instructions"] = current["delegation_instructions"]
+                board.read_source(current["id"], max_chars=1000)
+                board.submit(current["id"], summary="done", evidence="created readme", artifacts=[])
+
+            worker = SimpleNamespace(name="WORKER", chat=chat)
+            orchestrator = SimpleNamespace(
+                plan_tasks=lambda messages: SimpleNamespace(summary="unused", tasks=[]),
+                decide_next_action=lambda messages: SimpleNamespace(
+                    action="delegate_to_agent",
+                    agent_name="WORKER",
+                    task_key="TASK-README",
+                    description="Delegate next task",
+                ),
+                review_task=lambda messages: SimpleNamespace(outcome="accept", validation_notes="accepted", new_tasks=[]),
+            )
+            self.assertIsNone(self.run_loop(workspace, orchestrator, [worker], steps=3))
+            self.assertIn("TASK-README", seen["instructions"])
+            self.assertIn("extracted_documents/ADGZ__ADGZ.txt", seen["instructions"])
+            self.assertIn("README.md follows TEMPLATE_README.md format exactly", seen["instructions"])
+            self.assertNotEqual(seen["instructions"], "Delegate next task")
+
     def test_blocked_task_review_reopens_instead_of_crashing_on_accept(self):
         with tempfile.TemporaryDirectory() as workspace:
             board = TaskBoard(workspace, "test")
@@ -187,7 +266,7 @@ class RunnerScaleTests(unittest.TestCase):
             decisions = [SimpleNamespace(action="finish", description="done", task_key=None, agent_name=None)]
             orchestrator = SimpleNamespace(
                 plan_tasks=lambda messages: SimpleNamespace(summary="unused", tasks=[]),
-                decide_next_action=lambda messages: decisions.pop(0),
+                decide_next_action=lambda messages: decisions[0],
                 review_task=lambda messages: SimpleNamespace(outcome="accept", validation_notes="accepted", new_tasks=[]),
             )
             with self.assertRaises(BudgetExhausted):
