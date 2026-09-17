@@ -24,6 +24,16 @@ the artifacts and call `task_board(action='submit')` with specific evidence and
 every artifact path. Use `task_board(action='block')`, never a vague chat apology,
 when the task cannot proceed.
 
+For large file sets, prefer:
+
+* `workspace_fs(action='extract_zip')` for archive extraction,
+* `workspace_fs(action='list_tree')` for structure inspection,
+* `task_board(action='inventory')` to seed one task per file,
+* `task_board(action='read_source')` for bounded source reads,
+* `workspace_fs(action='write_text')` for README generation.
+
+Do not loop over hundreds of files with `run_shell` when a dedicated tool can do it in one call.
+
 ## Skill: Implement Feature
 
 Add new functionality using the existing project style.

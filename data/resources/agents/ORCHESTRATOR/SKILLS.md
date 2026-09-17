@@ -15,6 +15,12 @@ Each task should include:
 * acceptance criteria,
 * the best suggested agent when obvious.
 
+For archives or very large code/document collections:
+
+* create an extraction/inspection task first,
+* then create an inventory task that seeds one file task per extracted file,
+* avoid asking a worker to handle hundreds of files inside one delegation.
+
 ## Skill: Delegation
 
 Choose the next ready task and the best available agent for it.

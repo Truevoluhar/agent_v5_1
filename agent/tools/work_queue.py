@@ -14,10 +14,20 @@ def task_board_executor(
     text="",
     artifacts=None,
     limit=10,
+    root=".",
+    pattern="**/*",
+    task_type="implementation",
+    title_prefix="Analyze",
+    suggested_agent=None,
+    priority=50,
+    acceptance_criteria=None,
+    max_chars=4000,
+    parent_task_id=None,
     scope="default",
 ):
     board = TaskBoard(workspace, scope)
     artifacts = list(artifacts or [])
+    acceptance_criteria = list(acceptance_criteria or [])
 
     if action == "status":
         result = board.summary(limit=int(limit))
@@ -30,6 +40,26 @@ def task_board_executor(
     elif action == "list":
         statuses = [item.strip() for item in text.split(",") if item.strip()]
         result = board.list_tasks(statuses=statuses or None, limit=int(limit))
+    elif action == "inventory":
+        result = board.inventory(
+            root=root,
+            pattern=pattern,
+            task_type=task_type,
+            title_prefix=title_prefix,
+            description_template=summary or text or "Analyze {source_path}",
+            acceptance_criteria=acceptance_criteria,
+            suggested_agent=suggested_agent,
+            priority=int(priority),
+            created_by="worker",
+            parent_task_id=parent_task_id if parent_task_id is not None else task_id,
+        )
+    elif action == "read_source":
+        if task_id is None:
+            current = board.active_task()
+            if not current:
+                raise ValueError("task_id is required when there is no active task")
+            task_id = int(current["id"])
+        result = board.read_source(int(task_id), max_chars=int(max_chars))
     elif action == "submit":
         if task_id is None:
             raise ValueError("task_id is required for submit")
@@ -61,6 +91,8 @@ TASK_BOARD_TOOL = Tool(
     description=(
         "Durable SQLite task board shared by the orchestrator and workers. "
         "Use current/get/status/list to inspect task state. "
+        "Use inventory to seed one durable task per file for large document or code collections. "
+        "Use read_source to read a file task in bounded chunks until eof=true. "
         "Use submit to report a finished delegated task with summary, evidence, and artifact paths. "
         "Use block when the task cannot proceed. Use reopen only when retrying a returned task. "
         "verify checks that previously validated artifacts still exist."
@@ -70,7 +102,7 @@ TASK_BOARD_TOOL = Tool(
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["status", "current", "next", "get", "list", "submit", "block", "reopen", "verify"],
+                "enum": ["status", "current", "next", "get", "list", "inventory", "read_source", "submit", "block", "reopen", "verify"],
             },
             "task_id": {"type": ["integer", "null"]},
             "task_key": {"type": ["string", "null"]},
@@ -79,8 +111,21 @@ TASK_BOARD_TOOL = Tool(
             "text": {"type": "string"},
             "artifacts": {"type": "array", "items": {"type": "string"}},
             "limit": {"type": "integer"},
+            "root": {"type": "string"},
+            "pattern": {"type": "string"},
+            "task_type": {"type": "string"},
+            "title_prefix": {"type": "string"},
+            "suggested_agent": {"type": ["string", "null"]},
+            "priority": {"type": "integer"},
+            "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+            "max_chars": {"type": "integer"},
+            "parent_task_id": {"type": ["integer", "null"]},
         },
-        "required": ["action", "task_id", "task_key", "summary", "evidence", "text", "artifacts", "limit"],
+        "required": [
+            "action", "task_id", "task_key", "summary", "evidence", "text", "artifacts", "limit",
+            "root", "pattern", "task_type", "title_prefix", "suggested_agent", "priority",
+            "acceptance_criteria", "max_chars", "parent_task_id"
+        ],
         "additionalProperties": False,
     },
     executor=task_board_executor,

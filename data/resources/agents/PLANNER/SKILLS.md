@@ -8,6 +8,13 @@ Read the relevant code, config, docs, and existing artifacts before making concl
 
 When delegated a planning task, break the work into clear requirements, risks, dependencies, and recommended next actions.
 
+For archive or multi-hundred-file work, explicitly separate:
+
+* extraction,
+* inventory/seeding per-file tasks,
+* per-file analysis/output generation,
+* validation/sampling.
+
 ## Skill: Validate
 
 When delegated a review task, compare the requested acceptance criteria against the actual files, outputs, and tool results.

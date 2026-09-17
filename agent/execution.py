@@ -11,6 +11,12 @@ EXECUTION_POLICY = '''
 Use task_board as the durable source of truth for delegated work. Inspect the
 current delegated task before making changes, keep the work scoped to that task,
 and submit evidence back through task_board when the task is complete.
+For archives or very large file sets, prefer workspace_fs and task_board over
+run_shell. Use workspace_fs(action='extract_zip') to unpack archives safely,
+workspace_fs(action='list_tree') to inspect extracted contents, and
+task_board(action='inventory') to create one durable file task per document.
+For file tasks, use task_board(action='read_source') repeatedly until eof=true
+instead of shelling out with cat/sed hundreds of times.
 Before using run_shell, ensure a delegated task is already in progress. A shell
 command without a running task is rejected. Finish or block the current task
 before reporting progress so the next agent can resume from the durable ledger.

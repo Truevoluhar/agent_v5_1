@@ -241,6 +241,68 @@ class TaskBoardTests(unittest.TestCase):
         self.assertTrue(submitted["ok"])
         self.assertEqual(self.board.get_task(task_id=task["id"])["status"], "reported")
 
+    def test_inventory_and_read_source_support_large_file_sets(self):
+        project = self.root / "project"
+        project.mkdir()
+        for idx in range(3):
+            (project / f"file{idx}.py").write_text(f"print({idx})\n", encoding="utf-8")
+
+        seeded = execute_registered_tool(
+            workspace=str(self.root),
+            tool_name="task_board",
+            tool_input={
+                "action": "inventory",
+                "task_id": 0,
+                "task_key": None,
+                "summary": "Analyze {source_path} and create a README that follows TEMPLATE_README.md.",
+                "evidence": "",
+                "text": "",
+                "artifacts": [],
+                "limit": 10,
+                "root": "project",
+                "pattern": "*.py",
+                "task_type": "analysis",
+                "title_prefix": "Analyze",
+                "suggested_agent": "PROGRAMMER",
+                "priority": 20,
+                "acceptance_criteria": ["README created"],
+                "max_chars": 4000,
+                "parent_task_id": None,
+            },
+            scope="session",
+        )
+        self.assertTrue(seeded["ok"])
+        self.assertEqual(self.board.total_tasks(), 3)
+
+        task = self.board.next_ready()
+        self.board.begin_task(task["id"], "PROGRAMMER", "Analyze the file")
+        chunk = execute_registered_tool(
+            workspace=str(self.root),
+            tool_name="task_board",
+            tool_input={
+                "action": "read_source",
+                "task_id": task["id"],
+                "task_key": None,
+                "summary": "",
+                "evidence": "",
+                "text": "",
+                "artifacts": [],
+                "limit": 10,
+                "root": ".",
+                "pattern": "**/*",
+                "task_type": "implementation",
+                "title_prefix": "",
+                "suggested_agent": None,
+                "priority": 50,
+                "acceptance_criteria": [],
+                "max_chars": 4000,
+                "parent_task_id": None,
+            },
+            scope="session",
+        )
+        self.assertTrue(chunk["ok"])
+        self.assertIn("print", chunk["output"])
+
 
 if __name__ == "__main__":
     unittest.main()

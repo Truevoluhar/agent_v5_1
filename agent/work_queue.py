@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import codecs
 import hashlib
 import json
 import sqlite3
@@ -93,6 +94,7 @@ class TaskBoard:
                 ON task_events(task_id, id);
                 """
             )
+            self._ensure_task_columns(db)
         self._refresh_ready_states()
 
     @contextmanager
@@ -114,6 +116,21 @@ class TaskBoard:
         except json.JSONDecodeError:
             return []
         return value if isinstance(value, list) else []
+
+    @staticmethod
+    def _ensure_task_columns(db: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        additions = {
+            "source_path": "TEXT",
+            "source_hash": "TEXT",
+            "source_cursor": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, ddl in additions.items():
+            if column not in columns:
+                db.execute(f"ALTER TABLE tasks ADD COLUMN {column} {ddl}")
 
     def _normalize_task(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
@@ -146,6 +163,10 @@ class TaskBoard:
                 json.dumps(payload or {}, ensure_ascii=False, default=str),
             ),
         )
+
+    @staticmethod
+    def _is_excluded_path(relative: Path) -> bool:
+        return any(part in {".agent", ".git", "node_modules", "venv", "__pycache__"} for part in relative.parts)
 
     def _refresh_ready_states(self) -> None:
         with self.connect() as db:
@@ -236,14 +257,21 @@ class TaskBoard:
                     for item in (task.get("acceptance_criteria") or [])
                     if str(item).strip()
                 ]
+                source_path = str(task.get("source_path") or "").strip() or None
+                source_hash = None
+                if source_path:
+                    path = workspace_file(self.root, source_path)
+                    if not path.is_file():
+                        raise ValueError(f"Source file not found: {source_path}")
+                    source_hash = digest(path)
                 priority = int(task.get("priority", 50))
                 cursor = db.execute(
                     """
                     INSERT INTO tasks (
                         task_key, parent_task_id, title, description, task_type, priority,
                         status, suggested_agent, depends_on_keys, acceptance_criteria,
-                        created_by
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                        created_by, source_path, source_hash, source_cursor
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 0)
                     """,
                     (
                         task_key,
@@ -256,6 +284,8 @@ class TaskBoard:
                         json.dumps(depends_on_keys, ensure_ascii=False),
                         json.dumps(acceptance_criteria, ensure_ascii=False),
                         created_by,
+                        source_path,
+                        source_hash,
                     ),
                 )
                 task_id = int(cursor.lastrowid)
@@ -269,6 +299,7 @@ class TaskBoard:
                     "suggested_agent": task.get("suggested_agent"),
                     "depends_on_keys": depends_on_keys,
                     "acceptance_criteria": acceptance_criteria,
+                    "source_path": source_path,
                 }
                 created.append(created_task)
                 self._record_event(
@@ -281,6 +312,60 @@ class TaskBoard:
                 )
         self._refresh_ready_states()
         return created
+
+    def inventory(
+        self,
+        *,
+        root: str,
+        pattern: str,
+        task_type: str,
+        title_prefix: str,
+        description_template: str,
+        acceptance_criteria: list[str],
+        suggested_agent: str | None = None,
+        priority: int = 50,
+        created_by: str = "orchestrator",
+        parent_task_id: int | None = None,
+    ) -> dict[str, Any]:
+        base = workspace_file(self.root, root or ".")
+        if not base.is_dir():
+            raise ValueError("Inventory root must be a directory")
+
+        created: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for path in sorted(base.glob(pattern or "**/*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            relative = path.relative_to(self.root)
+            if self._is_excluded_path(relative):
+                continue
+            if str(relative) in seen:
+                continue
+            seen.add(str(relative))
+            created.append(
+                {
+                    "task_key": f"FILE-{relative.as_posix().replace('/', '-').replace('.', '_')}",
+                    "parent_task_id": parent_task_id,
+                    "title": f"{title_prefix} {relative.as_posix()}",
+                    "description": description_template.format(source_path=relative.as_posix()),
+                    "task_type": task_type,
+                    "priority": priority,
+                    "suggested_agent": suggested_agent,
+                    "acceptance_criteria": acceptance_criteria,
+                    "source_path": relative.as_posix(),
+                }
+            )
+
+        with self.connect() as db:
+            existing_sources = {
+                row["source_path"]
+                for row in db.execute(
+                    "SELECT source_path FROM tasks WHERE source_path IS NOT NULL"
+                ).fetchall()
+            }
+        filtered = [task for task in created if task["source_path"] not in existing_sources]
+        added = self.add_tasks(filtered, created_by=created_by) if filtered else []
+        return {"added": len(added), "discovered": len(created), "summary": self.summary()}
 
     def list_tasks(self, statuses: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
         self._refresh_ready_states()
@@ -361,7 +446,7 @@ class TaskBoard:
         self._refresh_ready_states()
         with self.connect() as db:
             row = db.execute(
-                "SELECT status, task_key FROM tasks WHERE id = ?",
+                "SELECT status, task_key, source_path FROM tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
             if row is None:
@@ -375,6 +460,7 @@ class TaskBoard:
                     assigned_agent = ?,
                     delegation_instructions = ?,
                     attempt_count = attempt_count + 1,
+                    source_cursor = 0,
                     started_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP,
                     last_error = NULL
@@ -391,6 +477,49 @@ class TaskBoard:
                 payload={"instructions": instructions},
             )
         return self.get_task(task_id=task_id) or {}
+
+    def read_source(self, task_id: int, max_chars: int = 4000) -> dict[str, Any]:
+        if not 4 <= max_chars <= 12000:
+            raise ValueError("max_chars must be between 4 and 12000")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                """
+                SELECT id, status, source_path, source_hash, source_cursor
+                FROM tasks
+                WHERE id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Unknown task")
+            if row["status"] not in {"in_progress", "reported"}:
+                raise ValueError("Task must be in_progress or reported before reading its source")
+            source_path = row["source_path"]
+            if not source_path:
+                raise ValueError("Task has no source file")
+            path = workspace_file(self.root, source_path)
+            if not path.is_file():
+                raise ValueError(f"Source file not found: {source_path}")
+            if row["source_cursor"] == 0 and row["source_hash"] and digest(path) != row["source_hash"]:
+                raise ValueError("Source changed since task creation; reopen the task to refresh it")
+            with path.open("rb") as stream:
+                stream.seek(int(row["source_cursor"] or 0))
+                chunk = stream.read(max_chars)
+                decoder = codecs.getincrementaldecoder("utf-8")()
+                content = decoder.decode(chunk, final=stream.tell() == path.stat().st_size)
+                end = stream.tell() - len(decoder.getstate()[0])
+            db.execute(
+                "UPDATE tasks SET source_cursor = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (end, task_id),
+            )
+            return {
+                "source_path": source_path,
+                "offset": int(row["source_cursor"] or 0),
+                "next_offset": end,
+                "eof": end == path.stat().st_size,
+                "content": content,
+            }
 
     def _artifact_records(self, artifacts: list[str]) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
@@ -430,7 +559,7 @@ class TaskBoard:
         records = self._artifact_records(artifacts)
         with self.connect() as db:
             row = db.execute(
-                "SELECT status, assigned_agent, task_key FROM tasks WHERE id = ?",
+                "SELECT status, assigned_agent, task_key, source_path, source_hash, source_cursor FROM tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
             if row is None:
@@ -439,6 +568,14 @@ class TaskBoard:
                 raise ValueError("Task must be in_progress or already reported before it can be submitted")
             if agent_name and row["assigned_agent"] and row["assigned_agent"] != agent_name:
                 raise ValueError("Only the assigned agent may submit this task")
+            if row["source_path"]:
+                path = workspace_file(self.root, row["source_path"])
+                if not path.is_file():
+                    raise ValueError(f"Source file not found: {row['source_path']}")
+                if row["source_hash"] and digest(path) != row["source_hash"]:
+                    raise ValueError("Source changed since task creation; reopen the task to refresh it")
+                if int(row["source_cursor"] or 0) < path.stat().st_size:
+                    raise ValueError("Read the full source before submitting this file task")
             db.execute(
                 """
                 UPDATE tasks
@@ -509,7 +646,7 @@ class TaskBoard:
     def reopen(self, task_id: int, notes: str = "") -> dict[str, Any]:
         with self.connect() as db:
             row = db.execute(
-                "SELECT status, task_key FROM tasks WHERE id = ?",
+                "SELECT status, task_key, source_path FROM tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
             if row is None:
@@ -523,10 +660,19 @@ class TaskBoard:
                     validation_notes = ?,
                     updated_at = CURRENT_TIMESTAMP,
                     assigned_agent = NULL,
-                    delegation_instructions = NULL
+                    delegation_instructions = NULL,
+                    source_hash = CASE
+                        WHEN source_path IS NULL THEN source_hash
+                        ELSE ?
+                    END,
+                    source_cursor = 0
                 WHERE id = ?
                 """,
-                (notes or None, task_id),
+                (
+                    notes or None,
+                    digest(workspace_file(self.root, row["source_path"])) if row["source_path"] else None,
+                    task_id,
+                ),
             )
             self._record_event(
                 db,

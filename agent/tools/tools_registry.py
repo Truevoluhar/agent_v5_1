@@ -5,6 +5,7 @@ from typing import Optional, Callable
 
 from agent.tools.tools_models import Tool, ToolResult
 from agent.tools.work_queue import TASK_BOARD_TOOL
+from agent.tools.workspace_fs import WORKSPACE_FS_TOOL
 from agent.tools.shell import RUN_SHELL_TOOL
 from agent.tools.drawio import READ_DRAWIO_REFERENCE_TOOL, UPSERT_DRAWIO_DIAGRAM_TOOL
 from agent.tools.git_repo import GIT_REPO_BROWSER_TOOL
@@ -14,6 +15,7 @@ from agent.tools.getAssetWhereUsed import GET_ASSET_WHERE_USED_TOOL
 TOOLS = {
     tool.name: tool for tool in [
         TASK_BOARD_TOOL,
+        WORKSPACE_FS_TOOL,
         RUN_SHELL_TOOL,
         READ_DRAWIO_REFERENCE_TOOL,
         UPSERT_DRAWIO_DIAGRAM_TOOL,
