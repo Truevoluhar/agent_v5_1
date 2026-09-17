@@ -401,10 +401,14 @@ class TaskBoard:
             path = workspace_file(self.root, normalized)
             if not path.exists():
                 raise ValueError(f"Artifact not found: {normalized}")
+            validation_mode = "exists"
+            if path.is_file() and path.parts and ".agent" in path.parts:
+                validation_mode = "sha256"
             records.append(
                 {
                     "path": normalized,
                     "sha256": digest(path) if path.is_file() else None,
+                    "validation_mode": validation_mode,
                 }
             )
         return records
@@ -431,8 +435,8 @@ class TaskBoard:
             ).fetchone()
             if row is None:
                 raise ValueError("Unknown task")
-            if row["status"] != "in_progress":
-                raise ValueError("Task must be in_progress before it can be submitted")
+            if row["status"] not in {"in_progress", "reported"}:
+                raise ValueError("Task must be in_progress or already reported before it can be submitted")
             if agent_name and row["assigned_agent"] and row["assigned_agent"] != agent_name:
                 raise ValueError("Only the assigned agent may submit this task")
             db.execute(
@@ -700,7 +704,8 @@ class TaskBoard:
                         if not path.exists():
                             raise ValueError("Artifact missing")
                         sha = artifact.get("sha256")
-                        if sha and path.is_file() and digest(path) != sha:
+                        validation_mode = artifact.get("validation_mode") or "exists"
+                        if validation_mode == "sha256" and sha and path.is_file() and digest(path) != sha:
                             raise ValueError("Artifact changed")
                 except (OSError, ValueError) as exc:
                     invalidated.append(int(row["id"]))

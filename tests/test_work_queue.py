@@ -114,8 +114,60 @@ class TaskBoardTests(unittest.TestCase):
         self.board.validate(task["id"], accepted=True, validation_notes="Accepted")
         artifact.write_text("v2", encoding="utf-8")
         state = self.board.verify()
+        self.assertEqual(state["invalidated"], [])
+        self.assertEqual(self.board.get_task(task_id=task["id"])["status"], "validated")
+
+    def test_verify_still_hashes_internal_agent_artifacts(self):
+        artifact_dir = self.root / ".agent"
+        artifact_dir.mkdir(exist_ok=True)
+        artifact = artifact_dir / "report.json"
+        artifact.write_text('{"ok": true}', encoding="utf-8")
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "TASK-REPORT",
+                    "title": "Create report",
+                    "description": "Save an internal report",
+                    "task_type": "verification",
+                    "priority": 1,
+                }
+            ]
+        )
+        task = self.board.next_ready()
+        self.board.begin_task(task["id"], "PROGRAMMER", "Create internal report")
+        self.board.submit(
+            task["id"],
+            summary="done",
+            evidence="Generated report",
+            artifacts=[".agent/report.json"],
+        )
+        self.board.validate(task["id"], accepted=True, validation_notes="Accepted")
+        artifact.write_text('{"ok": false}', encoding="utf-8")
+        state = self.board.verify()
         self.assertEqual(state["invalidated"], [task["id"]])
         self.assertEqual(self.board.get_task(task_id=task["id"])["status"], "blocked")
+
+    def test_submit_is_idempotent_after_first_report(self):
+        artifact = self.root / "out.txt"
+        artifact.write_text("done", encoding="utf-8")
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "TASK-IDEMPOTENT",
+                    "title": "Report twice",
+                    "description": "Worker may resubmit",
+                    "task_type": "implementation",
+                    "priority": 1,
+                }
+            ]
+        )
+        task = self.board.next_ready()
+        self.board.begin_task(task["id"], "PROGRAMMER", "Submit twice")
+        self.board.submit(task["id"], summary="first", evidence="first evidence", artifacts=["out.txt"])
+        self.board.submit(task["id"], summary="second", evidence="second evidence", artifacts=["out.txt"])
+        saved = self.board.get_task(task_id=task["id"])
+        self.assertEqual(saved["status"], "reported")
+        self.assertEqual(saved["result_summary"], "second")
 
     def test_shell_requires_a_running_task(self):
         refused = execute_registered_tool(

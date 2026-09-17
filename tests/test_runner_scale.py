@@ -57,6 +57,10 @@ class RunnerScaleTests(unittest.TestCase):
     def test_finish_is_rejected_when_board_is_incomplete(self):
         with tempfile.TemporaryDirectory() as workspace:
             board = TaskBoard(workspace, "test")
+            artifact_dir = Path(workspace) / ".agent"
+            artifact_dir.mkdir(exist_ok=True)
+            artifact = artifact_dir / "report.json"
+            artifact.write_text('{"ok": true}', encoding="utf-8")
             board.add_tasks(
                 [
                     {
@@ -154,6 +158,41 @@ class RunnerScaleTests(unittest.TestCase):
             worker_prompt = captured[-1]["content"]
             self.assertIn("Implement the change", worker_prompt)
             self.assertIn("task_board(action='submit')", worker_prompt)
+
+    def test_blocked_task_review_reopens_instead_of_crashing_on_accept(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            board = TaskBoard(workspace, "test")
+            artifact_dir = Path(workspace) / ".agent"
+            artifact_dir.mkdir(exist_ok=True)
+            artifact = artifact_dir / "report.json"
+            artifact.write_text('{"ok": true}', encoding="utf-8")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "TASK-1",
+                        "title": "Structure",
+                        "description": "Create structure",
+                        "task_type": "implementation",
+                        "priority": 1,
+                    }
+                ]
+            )
+            task = board.next_ready()
+            board.begin_task(task["id"], "WORKER", "Do the work")
+            board.submit(task["id"], summary="done", evidence="created files", artifacts=[".agent/report.json"])
+            board.validate(task["id"], accepted=True, validation_notes="accepted")
+            artifact.write_text('{"ok": false}', encoding="utf-8")
+            board.verify()
+
+            decisions = [SimpleNamespace(action="finish", description="done", task_key=None, agent_name=None)]
+            orchestrator = SimpleNamespace(
+                plan_tasks=lambda messages: SimpleNamespace(summary="unused", tasks=[]),
+                decide_next_action=lambda messages: decisions.pop(0),
+                review_task=lambda messages: SimpleNamespace(outcome="accept", validation_notes="accepted", new_tasks=[]),
+            )
+            with self.assertRaises(BudgetExhausted):
+                self.run_loop(workspace, orchestrator, [], steps=2)
+            self.assertEqual(board.get_task(task_id=task["id"])["status"], "ready")
 
 
 if __name__ == "__main__":

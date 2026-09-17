@@ -409,10 +409,29 @@ class AgentRunner:
                     }
                 )
 
+        if review.outcome == "accept" and task["status"] != "reported":
+            board.reopen(
+                task["id"],
+                "Task cannot be accepted while blocked; inspect the blocker, verify artifacts, and resubmit.",
+            )
+            session.add_message(
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"Task {task['task_key']} was blocked, so acceptance was rejected and the task was reopened. "
+                        "It needs a fresh worker report before validation."
+                    ),
+                }
+            )
+            return
+
         if review.outcome == "accept":
             board.validate(task["id"], accepted=True, validation_notes=review.validation_notes)
         elif review.outcome == "rework":
-            board.validate(task["id"], accepted=False, validation_notes=review.validation_notes)
+            if task["status"] == "reported":
+                board.validate(task["id"], accepted=False, validation_notes=review.validation_notes)
+            else:
+                board.reopen(task["id"], review.validation_notes)
         elif review.outcome == "cancel":
             board.cancel(task["id"], review.validation_notes)
 

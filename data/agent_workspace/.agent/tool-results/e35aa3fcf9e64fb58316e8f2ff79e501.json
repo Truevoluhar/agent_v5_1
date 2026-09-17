@@ -1,1 +1,0 @@
-{"tool": "work_queue", "arguments": "{\"action\":\"complete\",\"task_id\":1,\"text\":\"Development plan for 2D Java strategy game created, covering all requested mechanics and key steps.\",\"root\":\"\",\"pattern\":\"\",\"artifacts\":[\"PLAN.md\"]}", "result": {"ok": true, "output": "{\"completed\": 1}", "error": null, "metadata": {}}}
