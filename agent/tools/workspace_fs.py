@@ -4,7 +4,7 @@ import zipfile
 from pathlib import Path
 
 from agent.tools.tools_models import Tool, ToolResult
-from agent.work_queue import workspace_file
+from agent.work_queue import TaskBoard, workspace_file
 
 
 def _list_tree(workspace: Path, root: str, pattern: str, max_entries: int) -> ToolResult:
@@ -42,9 +42,10 @@ def _read_text(workspace: Path, path: str, max_chars: int, offset: int) -> ToolR
     if not target.is_file():
         return ToolResult(ok=False, output=None, error=f"File not found: {target}", metadata={})
     raw = target.read_bytes()
-    if b"\x00" in raw[:4096]:
+    encoding = TaskBoard._detect_text_encoding(raw[:32768])
+    if encoding is None:
         return ToolResult(ok=False, output=None, error="Binary file detected; read_text supports text files only", metadata={})
-    text = raw.decode("utf-8", errors="replace")
+    text = raw.decode(encoding, errors="replace")
     next_offset = min(len(text), max(0, offset) + max_chars)
     chunk = text[max(0, offset):next_offset]
     return ToolResult(
@@ -56,6 +57,7 @@ def _read_text(workspace: Path, path: str, max_chars: int, offset: int) -> ToolR
             "next_offset": next_offset,
             "eof": next_offset >= len(text),
             "total_chars": len(text),
+            "encoding": encoding,
         },
     )
 

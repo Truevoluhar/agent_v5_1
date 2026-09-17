@@ -303,6 +303,28 @@ class TaskBoardTests(unittest.TestCase):
         self.assertTrue(chunk["ok"])
         self.assertIn("print", chunk["output"])
 
+    def test_read_source_supports_non_utf8_text_files(self):
+        project = self.root / "project"
+        project.mkdir()
+        (project / "legacy.txt").write_bytes(b"Line one\nBullet\x8a line\n")
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "FILE-LEGACY",
+                    "title": "Analyze legacy.txt",
+                    "description": "Analyze legacy.txt",
+                    "task_type": "analysis",
+                    "priority": 1,
+                    "source_path": "project/legacy.txt",
+                }
+            ]
+        )
+        task = self.board.next_ready()
+        self.board.begin_task(task["id"], "PROGRAMMER", "Read it")
+        chunk = self.board.read_source(task["id"], max_chars=4000)
+        self.assertEqual(chunk["encoding"], "cp1252")
+        self.assertIn("Line one", chunk["content"])
+
 
 if __name__ == "__main__":
     unittest.main()
