@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from agent.execution import BudgetExhausted
 from agent.orchestrator_agent import create_orchestrator_response
-from agent.runner import AgentRunner
+from agent.runner import AgentRunner, _requires_bootstrap_before_dispatch
 from agent.tools.tools_registry import execute_registered_tool
 from agent.work_queue import TaskBoard
 
@@ -251,6 +251,30 @@ class RunnerScaleTests(unittest.TestCase):
             self.assertIn("README.md follows TEMPLATE_README.md format exactly", seen["instructions"])
             self.assertIn("ADGZ_ADGZ/README.md", seen["instructions"])
             self.assertNotEqual(seen["instructions"], "Delegate next task")
+
+    def test_collection_wide_task_waits_for_seed_backlog(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            board = TaskBoard(workspace, "test")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "SEED_README_TASKS",
+                        "title": "Create inventory and seed per-file README tasks",
+                        "description": "Inventory files and create durable per-file tasks.",
+                        "task_type": "analysis",
+                        "priority": 1,
+                    },
+                    {
+                        "task_key": "GENERATE_READMES",
+                        "title": "Generate comprehensive README.md for each extracted file",
+                        "description": "Read all files and create a README for each file.",
+                        "task_type": "implementation",
+                        "priority": 1,
+                    },
+                ]
+            )
+            aggregate = board.get_task(task_key="GENERATE_READMES")
+            self.assertTrue(_requires_bootstrap_before_dispatch(board, aggregate))
 
     def test_invalid_orchestrator_delegation_falls_back_to_first_ready_task(self):
         with tempfile.TemporaryDirectory() as workspace:

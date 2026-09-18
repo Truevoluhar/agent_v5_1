@@ -130,6 +130,56 @@ def _recommended_step_budget(base_max_steps: int, board_summary: dict[str, Any])
     return max(base_max_steps, recommended)
 
 
+def _looks_like_collection_wide_task(task: dict[str, Any]) -> bool:
+    metadata = task.get("task_metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if task.get("source_path"):
+        return False
+    if metadata.get("target_path"):
+        return False
+    haystack = " ".join(
+        str(part or "")
+        for part in [
+            task.get("task_key"),
+            task.get("title"),
+            task.get("description"),
+            " ".join(str(item) for item in (task.get("acceptance_criteria") or [])),
+        ]
+    ).lower()
+    markers = (
+        "each file",
+        "every file",
+        "all files",
+        "per file",
+        "each document",
+        "every document",
+        "all documents",
+        "for each extracted file",
+    )
+    return any(marker in haystack for marker in markers)
+
+
+def _has_bootstrap_backlog(board: TaskBoard, current_task_id: int | None = None) -> bool:
+    open_tasks = board.list_tasks(statuses=["ready", "pending"], limit=200)
+    for item in open_tasks:
+        if current_task_id is not None and int(item.get("id") or 0) == int(current_task_id):
+            continue
+        haystack = " ".join(
+            str(part or "")
+            for part in [item.get("task_key"), item.get("title"), item.get("description")]
+        ).lower()
+        if any(marker in haystack for marker in ("inventory", "seed", "inspect", "enumerate", "list all")):
+            return True
+    return False
+
+
+def _requires_bootstrap_before_dispatch(board: TaskBoard, task: dict[str, Any]) -> bool:
+    return _looks_like_collection_wide_task(task) and _has_bootstrap_backlog(
+        board, current_task_id=int(task.get("id") or 0)
+    )
+
+
 def _fallback_orchestrator_decision(
     *,
     ready_tasks: list[dict[str, Any]],
@@ -478,6 +528,9 @@ class AgentRunner:
                 "content": (
                     "Review this delegated task result and decide whether to accept it, "
                     "return it for rework, cancel it, or ask the user.\n"
+                    "When the broader job involves archives or many files, prefer follow-up "
+                    "inventory or per-file seeding tasks over a single collection-wide "
+                    "implementation task.\n"
                     + json.dumps(
                         {
                             "objective": objective,
@@ -741,6 +794,19 @@ class AgentRunner:
                         {
                             "role": "user",
                             "content": "Delegation rejected because the chosen task is not ready anymore. Pick another ready task.",
+                        }
+                    )
+                    continue
+
+                if _requires_bootstrap_before_dispatch(board, task):
+                    session.add_message(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Delegation rejected because this broad collection-wide task must not run yet. "
+                                "Dispatch the outstanding inspect, inventory, or per-file task-seeding work first "
+                                "so the runtime can create durable file-level tasks."
+                            ),
                         }
                     )
                     continue

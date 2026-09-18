@@ -386,6 +386,34 @@ class TaskBoardTests(unittest.TestCase):
         self.assertEqual(created[0]["task_metadata"]["target_path"], "AD576_AD5761S/README.md")
         self.assertEqual(created[0]["task_metadata"]["reference_paths"], ["TEMPLATE_README.md"])
 
+    def test_add_tasks_normalizes_dependency_key_casing(self):
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "EXTRACT_ZIP",
+                    "title": "Extract zip",
+                    "description": "Extract files",
+                    "task_type": "implementation",
+                    "priority": 1,
+                },
+                {
+                    "task_key": "INSPECT_WORKSPACE",
+                    "title": "Inspect workspace",
+                    "description": "Inspect files",
+                    "task_type": "analysis",
+                    "priority": 2,
+                    "depends_on_keys": ["extract_zip"],
+                },
+            ]
+        )
+        extract = self.board.get_task(task_key="EXTRACT_ZIP")
+        self.board.begin_task(extract["id"], "PROGRAMMER", "Extract")
+        self.board.submit(extract["id"], summary="done", evidence="done", artifacts=[])
+        self.board.validate(extract["id"], accepted=True, validation_notes="ok")
+        inspect_task = self.board.get_task(task_key="INSPECT_WORKSPACE")
+        self.assertEqual(inspect_task["depends_on_keys"], ["EXTRACT_ZIP"])
+        self.assertEqual(inspect_task["status"], "ready")
+
 
 if __name__ == "__main__":
     unittest.main()

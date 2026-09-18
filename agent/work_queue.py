@@ -118,6 +118,17 @@ class TaskBoard:
         return value if isinstance(value, list) else []
 
     @staticmethod
+    def _canonical_task_key(value: str) -> str:
+        return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+    @classmethod
+    def _resolve_dependency_key(cls, value: str, known_keys: dict[str, str]) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return ""
+        return known_keys.get(cls._canonical_task_key(normalized), normalized)
+
+    @staticmethod
     def _coerce_task_metadata(raw: Any) -> dict[str, Any]:
         if isinstance(raw, dict):
             return dict(raw)
@@ -339,14 +350,24 @@ class TaskBoard:
             existing_keys = {
                 row["task_key"] for row in db.execute("SELECT task_key FROM tasks").fetchall()
             }
+            known_keys = {
+                self._canonical_task_key(task_key): task_key
+                for task_key in existing_keys
+            }
+            prepared: list[tuple[dict[str, Any], str]] = []
             for task in tasks:
                 task_key = str(task.get("task_key") or task.get("title") or "TASK").strip()
                 if not task_key:
                     raise ValueError("Task key is required")
                 task_key = self._unique_key(task_key, existing_keys)
                 existing_keys.add(task_key)
+                known_keys[self._canonical_task_key(str(task.get("task_key") or task_key))] = task_key
+                known_keys[self._canonical_task_key(task_key)] = task_key
+                prepared.append((task, task_key))
+
+            for task, task_key in prepared:
                 depends_on_keys = [
-                    str(item).strip()
+                    self._resolve_dependency_key(str(item).strip(), known_keys)
                     for item in (task.get("depends_on_keys") or [])
                     if str(item).strip()
                 ]
