@@ -32,6 +32,12 @@ IsCancelled = Callable[[], bool]
 logger = logging.getLogger(__name__)
 
 
+class IncompleteRun(BudgetExhausted):
+    def __init__(self, message: str, final_response: Any = None):
+        super().__init__(message)
+        self.final_response = final_response
+
+
 @dataclass
 class RunRequest:
     username: str
@@ -80,12 +86,26 @@ def _looks_like_placeholder_instruction(text: str) -> bool:
 def _build_delegation_instructions(task: dict[str, Any], description: str) -> str:
     cleaned_description = " ".join(str(description or "").split())
     instructions: list[str] = []
+    metadata = task.get("task_metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
     if cleaned_description and not _looks_like_placeholder_instruction(cleaned_description):
         instructions.append(cleaned_description)
     else:
         instructions.append(f"Complete task {task['task_key']}: {task['title']}.")
     if task.get("source_path"):
         instructions.append(f"Analyze source file '{task['source_path']}'.")
+    reference_paths = [str(item).strip() for item in (metadata.get("reference_paths") or []) if str(item).strip()]
+    if reference_paths:
+        instructions.append("Use reference file(s): " + ", ".join(f"'{item}'" for item in reference_paths[:4]) + ".")
+    if metadata.get("entity_name"):
+        instructions.append(f"Primary work item name: '{metadata['entity_name']}'.")
+    if metadata.get("group_name"):
+        instructions.append(f"Group or project key: '{metadata['group_name']}'.")
+    if metadata.get("target_dir"):
+        instructions.append(f"Create or update the target directory '{metadata['target_dir']}'.")
+    if metadata.get("target_path"):
+        instructions.append(f"Write the final artifact exactly to '{metadata['target_path']}'.")
     if task.get("description"):
         instructions.append(str(task["description"]).strip())
     acceptance = [item.strip() for item in (task.get("acceptance_criteria") or []) if str(item).strip()]
@@ -315,6 +335,15 @@ class AgentRunner:
                 wait_for_input=wait_for_input,
                 is_cancelled=is_cancelled,
             )
+        except IncompleteRun as exc:
+            emitter.emit("run.failed", {"error": str(exc), "resumable": True})
+            return RunResult(
+                run_id=run_id,
+                session_id=session.id,
+                status="failed",
+                error=str(exc),
+                final_response=exc.final_response,
+            )
         except BudgetExhausted as exc:
             emitter.emit("run.failed", {"error": str(exc), "resumable": True})
             return RunResult(run_id=run_id, session_id=session.id, status="failed", error=str(exc))
@@ -385,6 +414,11 @@ class AgentRunner:
                     "Create the initial SQLite task board for this user request. "
                     "Break the work into concrete tasks with dependencies, priorities, suggested agents, "
                     "and acceptance criteria. Use all available agents where it helps. "
+                    "For work that depends on discovering files inside an archive or large directory, "
+                    "prefer bootstrap tasks first: extract or inspect the collection, inventory it, "
+                    "then create a follow-up task whose explicit job is to call "
+                    "task_board(action='inventory') so the runtime can seed one durable file task per discovered file. "
+                    "Do not guess or pre-create many file-specific tasks before the relevant files are actually known. "
                     "Current objective:\n" + objective
                 ),
             }
@@ -838,6 +872,9 @@ class AgentRunner:
             )
             if is_cancelled():
                 raise RunCancelled()
-            return final_response
+            raise IncompleteRun(
+                "Run step budget reached before the task board fully completed; resume this session to continue durable work.",
+                final_response=final_response,
+            )
 
         raise BudgetExhausted("Run step budget reached; resume this session to continue durable work.")

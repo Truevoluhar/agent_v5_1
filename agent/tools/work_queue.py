@@ -24,10 +24,12 @@ def task_board_executor(
     max_chars=4000,
     parent_task_id=None,
     scope="default",
+    task_metadata=None,
 ):
     board = TaskBoard(workspace, scope)
     artifacts = list(artifacts or [])
     acceptance_criteria = list(acceptance_criteria or [])
+    task_metadata = board._coerce_task_metadata(task_metadata)
 
     if action == "status":
         result = board.summary(limit=int(limit))
@@ -52,6 +54,7 @@ def task_board_executor(
             priority=int(priority),
             created_by="worker",
             parent_task_id=parent_task_id if parent_task_id is not None else task_id,
+            task_metadata=task_metadata,
         )
     elif action == "read_source":
         if task_id is None:
@@ -120,11 +123,24 @@ TASK_BOARD_TOOL = Tool(
             "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
             "max_chars": {"type": "integer"},
             "parent_task_id": {"type": ["integer", "null"]},
+            "task_metadata": {
+                "type": ["array", "null"],
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                        "value": {"type": ["string", "null"]},
+                        "values": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["key", "value", "values"],
+                    "additionalProperties": False,
+                },
+            },
         },
         "required": [
             "action", "task_id", "task_key", "summary", "evidence", "text", "artifacts", "limit",
             "root", "pattern", "task_type", "title_prefix", "suggested_agent", "priority",
-            "acceptance_criteria", "max_chars", "parent_task_id"
+            "acceptance_criteria", "max_chars", "parent_task_id", "task_metadata"
         ],
         "additionalProperties": False,
     },

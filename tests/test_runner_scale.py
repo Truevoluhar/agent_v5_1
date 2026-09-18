@@ -1,5 +1,7 @@
+import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +10,7 @@ from pydantic import ValidationError
 from agent.execution import BudgetExhausted
 from agent.orchestrator_agent import create_orchestrator_response
 from agent.runner import AgentRunner
+from agent.tools.tools_registry import execute_registered_tool
 from agent.work_queue import TaskBoard
 
 
@@ -213,6 +216,13 @@ class RunnerScaleTests(unittest.TestCase):
                             "README.md is placed in a folder named after the project",
                         ],
                         "source_path": "extracted_documents/ADGZ__ADGZ.txt",
+                        "task_metadata": {
+                            "entity_name": "ADGZ_ADGZ",
+                            "group_name": "ADGZ",
+                            "target_dir": "ADGZ_ADGZ",
+                            "target_path": "ADGZ_ADGZ/README.md",
+                            "reference_paths": ["TEMPLATE_README.md"],
+                        },
                     }
                 ]
             )
@@ -239,6 +249,7 @@ class RunnerScaleTests(unittest.TestCase):
             self.assertIn("TASK-README", seen["instructions"])
             self.assertIn("extracted_documents/ADGZ__ADGZ.txt", seen["instructions"])
             self.assertIn("README.md follows TEMPLATE_README.md format exactly", seen["instructions"])
+            self.assertIn("ADGZ_ADGZ/README.md", seen["instructions"])
             self.assertNotEqual(seen["instructions"], "Delegate next task")
 
     def test_invalid_orchestrator_delegation_falls_back_to_first_ready_task(self):
@@ -286,6 +297,247 @@ class RunnerScaleTests(unittest.TestCase):
             self.assertIsNone(self.run_loop(workspace, orchestrator, [worker], steps=3))
             self.assertIsNotNone(caught)
             self.assertEqual(board.get_task(task_key="TASK-A")["status"], "validated")
+
+    def test_tiny_zip_readme_flow_uses_generic_task_metadata(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            archive = root / "tiny_sources.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                for idx in range(20):
+                    zf.writestr(
+                        f"module_{idx}.py",
+                        (
+                            f"def add_{idx}(value: int) -> int:\n"
+                            f"    \"\"\"Return value plus {idx}.\"\"\"\n"
+                            f"    return value + {idx}\n"
+                        ),
+                    )
+            (root / "TEMPLATE_README.md").write_text(
+                "# {{entity_name}}\n\n## Summary\n\n## Behavior\n\n## Example\n",
+                encoding="utf-8",
+            )
+
+            board = TaskBoard(workspace, "test")
+
+            class PlannedTask:
+                def __init__(self, payload):
+                    self.payload = payload
+
+                def model_dump(self, exclude_none=True):
+                    return dict(self.payload)
+
+            orchestrator = SimpleNamespace(
+                name="ORCHESTRATOR",
+                plan_tasks=lambda messages: SimpleNamespace(
+                    summary="Extract archive and document each source file.",
+                    tasks=[
+                        PlannedTask(
+                            {
+                                "task_key": "EXTRACT_ARCHIVE",
+                                "title": "Extract archive",
+                                "description": "Extract tiny_sources.zip into extracted/",
+                                "task_type": "implementation",
+                                "priority": 1,
+                                "suggested_agent": "PROGRAMMER",
+                                "acceptance_criteria": ["Archive extracted into extracted/"],
+                            }
+                        ),
+                        PlannedTask(
+                            {
+                                "task_key": "INVENTORY_SOURCES",
+                                "title": "Inventory extracted sources",
+                                "description": "Create one documentation task per extracted Python file.",
+                                "task_type": "coordination",
+                                "priority": 2,
+                                "depends_on_keys": ["EXTRACT_ARCHIVE"],
+                                "suggested_agent": "PROGRAMMER",
+                                "acceptance_criteria": ["One file task exists for every source file"],
+                            }
+                        ),
+                    ],
+                ),
+                decide_next_action=lambda messages: (
+                    SimpleNamespace(
+                        action="delegate_to_agent",
+                        agent_name="PROGRAMMER",
+                        task_key=(board.next_ready() or {"task_key": None})["task_key"],
+                        description="Process the next ready task",
+                    )
+                    if board.summary()["remaining"] > 0
+                    else SimpleNamespace(action="finish", description="done", task_key=None, agent_name=None)
+                ),
+                review_task=lambda messages: SimpleNamespace(outcome="accept", validation_notes="accepted", new_tasks=[]),
+            )
+
+            def read_json_output(result):
+                self.assertTrue(result["ok"], result.get("error"))
+                return json.loads(result["output"]) if result["output"] else {}
+
+            def chat(*args, **kwargs):
+                current = read_json_output(
+                    execute_registered_tool(
+                        workspace=workspace,
+                        tool_name="task_board",
+                        tool_input={"action": "current"},
+                        scope="test",
+                    )
+                )
+                task_key = current["task_key"]
+                if task_key == "EXTRACT_ARCHIVE":
+                    extracted = execute_registered_tool(
+                        workspace=workspace,
+                        tool_name="workspace_fs",
+                        tool_input={
+                            "action": "extract_zip",
+                            "zip_path": "tiny_sources.zip",
+                            "destination": "extracted",
+                            "overwrite": False,
+                        },
+                        scope="test",
+                    )
+                    self.assertTrue(extracted["ok"], extracted.get("error"))
+                    listed = execute_registered_tool(
+                        workspace=workspace,
+                        tool_name="workspace_fs",
+                        tool_input={"action": "list_tree", "root": "extracted", "pattern": "*.py", "max_entries": 30},
+                        scope="test",
+                    )
+                    self.assertTrue(listed["ok"], listed.get("error"))
+                    submitted = execute_registered_tool(
+                        workspace=workspace,
+                        tool_name="task_board",
+                        tool_input={
+                            "action": "submit",
+                            "task_id": current["id"],
+                            "summary": "Archive extracted.",
+                            "evidence": "tiny_sources.zip extracted into extracted/ with Python files.",
+                            "artifacts": ["extracted"],
+                        },
+                        scope="test",
+                    )
+                    self.assertTrue(submitted["ok"], submitted.get("error"))
+                    return
+
+                if task_key == "INVENTORY_SOURCES":
+                    seeded = execute_registered_tool(
+                        workspace=workspace,
+                        tool_name="task_board",
+                        tool_input={
+                            "action": "inventory",
+                            "task_id": current["id"],
+                            "summary": "Analyze {source_path}. Save the primary artifact to {target_path}.",
+                            "root": "extracted",
+                            "pattern": "*.py",
+                            "task_type": "documentation",
+                            "title_prefix": "Generate README for",
+                            "suggested_agent": "PROGRAMMER",
+                            "priority": 10,
+                            "acceptance_criteria": ["README.md created", "README saved to target_path"],
+                        },
+                        scope="test",
+                    )
+                    self.assertTrue(seeded["ok"], seeded.get("error"))
+                    submitted = execute_registered_tool(
+                        workspace=workspace,
+                        tool_name="task_board",
+                        tool_input={
+                            "action": "submit",
+                            "task_id": current["id"],
+                            "summary": "Created one file task per source file.",
+                            "evidence": "Inventory completed for extracted/*.py and task board now contains file tasks.",
+                            "artifacts": [],
+                        },
+                        scope="test",
+                    )
+                    self.assertTrue(submitted["ok"], submitted.get("error"))
+                    return
+
+                metadata = current["task_metadata"]
+                content_parts = []
+                while True:
+                    chunk = read_json_output(
+                        execute_registered_tool(
+                            workspace=workspace,
+                            tool_name="task_board",
+                            tool_input={"action": "read_source", "task_id": current["id"], "max_chars": 4000},
+                            scope="test",
+                        )
+                    )
+                    content_parts.append(chunk["content"])
+                    if chunk["eof"]:
+                        break
+                source_text = "".join(content_parts)
+                template = execute_registered_tool(
+                    workspace=workspace,
+                    tool_name="workspace_fs",
+                    tool_input={"action": "read_text", "path": "TEMPLATE_README.md", "max_chars": 4000, "offset": 0},
+                    scope="test",
+                )
+                self.assertTrue(template["ok"], template.get("error"))
+
+                source_name = Path(current["source_path"]).name
+                func_name = f"add_{metadata['entity_name'].split('_')[-1]}"
+                readme = (
+                    f"# {metadata['entity_name']}\n\n"
+                    f"## Summary\n\n"
+                    f"Source file `{source_name}` defines `{func_name}`.\n\n"
+                    f"## Behavior\n\n"
+                    f"This function returns the input value plus {metadata['entity_name'].split('_')[-1]}.\n\n"
+                    f"## Example\n\n"
+                    f"`{func_name}(3)` returns `{3 + int(metadata['entity_name'].split('_')[-1])}`.\n"
+                )
+                made_dir = execute_registered_tool(
+                    workspace=workspace,
+                    tool_name="workspace_fs",
+                    tool_input={"action": "mkdir", "path": metadata["target_dir"]},
+                    scope="test",
+                )
+                self.assertTrue(made_dir["ok"], made_dir.get("error"))
+                write = execute_registered_tool(
+                    workspace=workspace,
+                    tool_name="workspace_fs",
+                    tool_input={
+                        "action": "write_text",
+                        "path": metadata["target_path"],
+                        "content": readme,
+                        "append": False,
+                    },
+                    scope="test",
+                )
+                self.assertTrue(write["ok"], write.get("error"))
+                artifact = execute_registered_tool(
+                    workspace=workspace,
+                    tool_name="workspace_fs",
+                    tool_input={"action": "read_text", "path": metadata["target_path"], "max_chars": 4000, "offset": 0},
+                    scope="test",
+                )
+                self.assertTrue(artifact["ok"], artifact.get("error"))
+                self.assertIn(func_name, artifact["output"])
+                self.assertIn("return value +", source_text)
+                submitted = execute_registered_tool(
+                    workspace=workspace,
+                    tool_name="task_board",
+                    tool_input={
+                        "action": "submit",
+                        "task_id": current["id"],
+                        "summary": f"Created README for {source_name}.",
+                        "evidence": f"Wrote {metadata['target_path']} based on full source inspection and template reference.",
+                        "artifacts": [metadata["target_path"]],
+                    },
+                    scope="test",
+                )
+                self.assertTrue(submitted["ok"], submitted.get("error"))
+
+            worker = SimpleNamespace(name="PROGRAMMER", chat=chat)
+
+            self.assertIsNone(self.run_loop(workspace, orchestrator, [worker], steps=8))
+            summary = board.summary()
+            self.assertEqual(summary["remaining"], 0)
+            readmes = sorted(root.glob("module_*/README.md"))
+            self.assertEqual(len(readmes), 20)
+            self.assertTrue((root / "module_0" / "README.md").is_file())
+            self.assertIn("add_0", (root / "module_0" / "README.md").read_text(encoding="utf-8"))
+            self.assertEqual(board.completion_report()["validated_tasks"], 22)
 
     def test_blocked_task_review_reopens_instead_of_crashing_on_accept(self):
         with tempfile.TemporaryDirectory() as workspace:

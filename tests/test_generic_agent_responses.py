@@ -174,6 +174,33 @@ class GenericAgentResponsesTests(unittest.TestCase):
         )
         self.assertNotIn("previous_response_id", client.calls[2])
 
+    def test_successful_task_board_submit_yields_immediately(self):
+        submit_call = SimpleNamespace(
+            type="function_call",
+            name="task_board",
+            arguments=json.dumps({"action": "submit"}),
+            call_id="call_submit",
+        )
+        client = FakeResponsesClient([response([submit_call])])
+        agent = self.make_agent(client)
+        session = FakeSession()
+
+        with patch("agent.generic_agent.get_tool_schemas", return_value=[]), patch(
+            "agent.generic_agent.execute_registered_tool",
+            return_value={"ok": True, "output": '{"status":"reported"}'},
+        ):
+            result = agent.chat(
+                [{"role": "user", "content": "finish the delegated task"}],
+                session,
+            )
+
+        self.assertEqual(result, "Worker yielded after task_board action='submit'.")
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(
+            session.messages,
+            [{"role": "assistant", "content": "Worker yielded after task_board action='submit'."}],
+        )
+
 
 class LongRunTests(unittest.TestCase):
     make_agent = GenericAgentResponsesTests.make_agent

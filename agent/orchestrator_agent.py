@@ -35,6 +35,53 @@ class PlannedTaskBase(BaseModel):
     priority: int = Field(ge=1, le=100, description="Lower number means earlier execution.")
     depends_on_keys: list[str] = Field(default_factory=list, description="Task keys that must finish first.")
     acceptance_criteria: list[str] = Field(default_factory=list, description="Observable completion checks.")
+    task_metadata: list["TaskMetadataEntry"] = Field(
+        default_factory=list,
+        description="Optional structured task metadata as key/value entries, for example target paths, reference files, or domain-specific context.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_task_metadata(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        raw_entries = value.get("task_metadata")
+        if not isinstance(raw_entries, list):
+            return value
+        normalized_entries: list[dict[str, Any]] = []
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            raw_value = item.get("value")
+            raw_values = item.get("values")
+            values = [str(entry) for entry in raw_values if str(entry).strip()] if isinstance(raw_values, list) else []
+            if not key or (raw_value is None and not values):
+                continue
+            normalized_entries.append(
+                {
+                    "key": key,
+                    "value": None if raw_value is None else str(raw_value),
+                    "values": values,
+                }
+            )
+        normalized = dict(value)
+        normalized["task_metadata"] = normalized_entries
+        return normalized
+
+
+class TaskMetadataEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(description="Metadata key such as target_path, target_dir, entity_name, group_name, or reference_paths.")
+    value: str | None = Field(default=None, description="Single metadata value for this key, when applicable.")
+    values: list[str] = Field(default_factory=list, description="Multiple metadata values for this key, when applicable.")
+
+    @model_validator(mode="after")
+    def validate_value_shape(self) -> Self:
+        if self.value is None and not self.values:
+            raise ValueError("task metadata entry requires value or values")
+        return self
 
 
 class OrchestratorDecisionBase(BaseModel):

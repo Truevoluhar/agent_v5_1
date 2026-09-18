@@ -17,6 +17,10 @@ workspace_fs(action='list_tree') to inspect extracted contents, and
 task_board(action='inventory') to create one durable file task per document.
 For file tasks, use task_board(action='read_source') repeatedly until eof=true
 instead of shelling out with cat/sed hundreds of times.
+If the delegated task includes task_metadata such as target_dir, target_path,
+entity_name, group_name, or reference_paths, treat that metadata as the
+required destination and reference context. Do not invent alternate extraction
+roots or output folders.
 Before using run_shell, ensure a delegated task is already in progress. A shell
 command without a running task is rejected. Finish or block the current task
 before reporting progress so the next agent can resume from the durable ledger.

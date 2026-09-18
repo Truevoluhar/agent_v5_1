@@ -272,6 +272,10 @@ class TaskBoardTests(unittest.TestCase):
         project.mkdir()
         for idx in range(3):
             (project / f"file{idx}.py").write_text(f"print({idx})\n", encoding="utf-8")
+        nested = project / "nested"
+        nested.mkdir()
+        (nested / "deep.py").write_text("print('deep')\n", encoding="utf-8")
+        (self.root / "TEMPLATE_README.md").write_text("# Template\n", encoding="utf-8")
 
         seeded = execute_registered_tool(
             workspace=str(self.root),
@@ -298,7 +302,16 @@ class TaskBoardTests(unittest.TestCase):
             scope="session",
         )
         self.assertTrue(seeded["ok"])
-        self.assertEqual(self.board.total_tasks(), 3)
+        self.assertEqual(self.board.total_tasks(), 4)
+        planned = self.board.get_task(task_key="FILE-PROJECT-FILE0_PY")
+        self.assertEqual(planned["task_metadata"]["entity_name"], "file0")
+        self.assertEqual(planned["task_metadata"]["group_name"], "file0")
+        self.assertEqual(planned["task_metadata"]["target_dir"], "file0")
+        self.assertEqual(planned["task_metadata"]["target_path"], "file0/README.md")
+        self.assertEqual(planned["task_metadata"]["reference_paths"], ["TEMPLATE_README.md"])
+        self.assertIn("file0/README.md", planned["description"])
+        nested_task = self.board.get_task(task_key="FILE-PROJECT-NESTED-DEEP_PY")
+        self.assertEqual(nested_task["source_path"], "project/nested/deep.py")
 
         task = self.board.next_ready()
         self.board.begin_task(task["id"], "PROGRAMMER", "Analyze the file")
@@ -350,6 +363,28 @@ class TaskBoardTests(unittest.TestCase):
         chunk = self.board.read_source(task["id"], max_chars=4000)
         self.assertEqual(chunk["encoding"], "cp1252")
         self.assertIn("Line one", chunk["content"])
+
+    def test_add_tasks_derives_project_output_fields_for_file_tasks(self):
+        source_dir = self.root / "source_code"
+        source_dir.mkdir()
+        (self.root / "TEMPLATE_README.md").write_text("# Template\n", encoding="utf-8")
+        (source_dir / "AD576__AD5761S.txt").write_text("PROC OPTIONS(MAIN);", encoding="utf-8")
+        created = self.board.add_tasks(
+            [
+                {
+                    "task_key": "FILE-AD576",
+                    "title": "Generate README",
+                    "description": "Analyze the source",
+                    "task_type": "documentation",
+                    "priority": 1,
+                    "source_path": "source_code/AD576__AD5761S.txt",
+                }
+            ]
+        )
+        self.assertEqual(created[0]["task_metadata"]["entity_name"], "AD576_AD5761S")
+        self.assertEqual(created[0]["task_metadata"]["group_name"], "AD576")
+        self.assertEqual(created[0]["task_metadata"]["target_path"], "AD576_AD5761S/README.md")
+        self.assertEqual(created[0]["task_metadata"]["reference_paths"], ["TEMPLATE_README.md"])
 
 
 if __name__ == "__main__":

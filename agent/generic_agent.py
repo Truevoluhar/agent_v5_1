@@ -247,6 +247,7 @@ class GenericAgent:
             for tool_call in tool_calls:
                 check_cancelled()
                 tool_name = tool_call.name
+                terminal_task_handoff = False
 
                 try:
                     arguments = json.loads(tool_call.arguments)
@@ -291,6 +292,12 @@ class GenericAgent:
                         }
                         if emit is not None:
                             emit("tool.completed", {"agent": self.name, "tool": tool_name, "ok": False})
+                    else:
+                        terminal_task_handoff = (
+                            tool_name == "task_board"
+                            and arguments.get("action") in {"submit", "block"}
+                            and bool(tool_result.get("ok", False))
+                        )
 
                 log_dir = Path(self.workspace_path) / ".agent" / "tool-results"
                 log_dir.mkdir(parents=True, exist_ok=True)
@@ -314,6 +321,17 @@ class GenericAgent:
                         "output": serialized_result,
                     }
                 )
+
+                if terminal_task_handoff:
+                    handoff_action = arguments.get("action", "submit")
+                    handoff_message = {
+                        "role": "assistant",
+                        "content": f"Worker yielded after task_board action='{handoff_action}'.",
+                    }
+                    session.add_message(handoff_message)
+                    if emit is not None:
+                        emit("agent.message.completed", {"agent": self.name, "content": handoff_message["content"]})
+                    return handoff_message["content"]
 
             last_error = None
             next_response = None

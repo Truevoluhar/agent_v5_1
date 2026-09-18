@@ -118,6 +118,28 @@ class TaskBoard:
         return value if isinstance(value, list) else []
 
     @staticmethod
+    def _coerce_task_metadata(raw: Any) -> dict[str, Any]:
+        if isinstance(raw, dict):
+            return dict(raw)
+        if isinstance(raw, list):
+            metadata: dict[str, Any] = {}
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("key") or "").strip()
+                if not key:
+                    continue
+                values = item.get("values")
+                if isinstance(values, list) and values:
+                    metadata[key] = [str(value) for value in values if str(value).strip()]
+                    continue
+                value = item.get("value")
+                if value is not None:
+                    metadata[key] = str(value)
+            return metadata
+        return {}
+
+    @staticmethod
     def _ensure_task_columns(db: sqlite3.Connection) -> None:
         columns = {
             row["name"]
@@ -128,6 +150,12 @@ class TaskBoard:
             "source_hash": "TEXT",
             "source_cursor": "INTEGER NOT NULL DEFAULT 0",
             "source_encoding": "TEXT",
+            "task_metadata": "TEXT NOT NULL DEFAULT '{}'",
+            "project_name": "TEXT",
+            "project_code": "TEXT",
+            "output_dir": "TEXT",
+            "output_path": "TEXT",
+            "template_path": "TEXT",
         }
         for column, ddl in additions.items():
             if column not in columns:
@@ -139,6 +167,28 @@ class TaskBoard:
         item = dict(row)
         for field in ("depends_on_keys", "acceptance_criteria", "artifacts"):
             item[field] = self._loads_list(item.get(field))
+        raw_metadata = item.get("task_metadata")
+        try:
+            metadata = json.loads(raw_metadata) if raw_metadata else {}
+        except json.JSONDecodeError:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        # Backward compatibility for runs created before generic metadata existed.
+        legacy_map = {
+            "project_name": "entity_name",
+            "project_code": "group_name",
+            "output_dir": "target_dir",
+            "output_path": "target_path",
+            "template_path": "reference_path",
+        }
+        for legacy_key, metadata_key in legacy_map.items():
+            value = item.get(legacy_key)
+            if value and metadata_key not in metadata:
+                metadata[metadata_key] = value
+        if metadata.get("reference_path") and "reference_paths" not in metadata:
+            metadata["reference_paths"] = [metadata["reference_path"]]
+        item["task_metadata"] = metadata
         return item
 
     def _record_event(
@@ -170,6 +220,15 @@ class TaskBoard:
         return any(part in {".agent", ".git", "node_modules", "venv", "__pycache__"} for part in relative.parts)
 
     @staticmethod
+    def _inventory_pattern(pattern: str) -> str:
+        normalized = str(pattern or "").strip()
+        if not normalized:
+            return "**/*"
+        if normalized.startswith("**/") or "/" in normalized:
+            return normalized
+        return f"**/{normalized}"
+
+    @staticmethod
     def _detect_text_encoding(raw: bytes) -> str | None:
         if not raw:
             return "utf-8"
@@ -182,6 +241,30 @@ class TaskBoard:
             except UnicodeDecodeError:
                 continue
         return "latin-1"
+
+    @staticmethod
+    def _sanitize_folder_name(name: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(name or "").strip())
+        while "__" in cleaned:
+            cleaned = cleaned.replace("__", "_")
+        return cleaned.strip("._-") or "project"
+
+    def _derive_file_task_metadata(self, source_path: str) -> dict[str, Any]:
+        relative = Path(source_path)
+        stem = relative.stem or relative.name
+        project_code = stem.split("__", 1)[0] if "__" in stem else stem
+        entity_name = self._sanitize_folder_name(stem)
+        template_file = workspace_file(self.root, "TEMPLATE_README.md")
+        metadata: dict[str, Any] = {
+            "entity_name": entity_name,
+            "group_name": self._sanitize_folder_name(project_code),
+            "target_dir": entity_name,
+            "target_path": f"{entity_name}/README.md",
+            "work_type": "document_source_file",
+        }
+        if template_file.is_file():
+            metadata["reference_paths"] = ["TEMPLATE_README.md"]
+        return metadata
 
     def _refresh_ready_states(self) -> None:
         with self.connect() as db:
@@ -275,20 +358,25 @@ class TaskBoard:
                 source_path = str(task.get("source_path") or "").strip() or None
                 source_hash = None
                 source_encoding = None
+                derived_metadata: dict[str, Any] = {}
                 if source_path:
                     path = workspace_file(self.root, source_path)
                     if not path.is_file():
                         raise ValueError(f"Source file not found: {source_path}")
                     source_hash = digest(path)
                     source_encoding = self._detect_text_encoding(path.read_bytes()[:32768])
+                    derived_metadata = self._derive_file_task_metadata(source_path)
+                task_metadata = dict(derived_metadata)
+                task_metadata.update(self._coerce_task_metadata(task.get("task_metadata")))
                 priority = int(task.get("priority", 50))
                 cursor = db.execute(
                     """
                     INSERT INTO tasks (
                         task_key, parent_task_id, title, description, task_type, priority,
                         status, suggested_agent, depends_on_keys, acceptance_criteria,
-                        created_by, source_path, source_hash, source_cursor, source_encoding
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 0, ?)
+                        created_by, source_path, source_hash, source_cursor, source_encoding,
+                        task_metadata
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 0, ?, ?)
                     """,
                     (
                         task_key,
@@ -304,6 +392,7 @@ class TaskBoard:
                         source_path,
                         source_hash,
                         source_encoding,
+                        json.dumps(task_metadata, ensure_ascii=False),
                     ),
                 )
                 task_id = int(cursor.lastrowid)
@@ -319,6 +408,7 @@ class TaskBoard:
                     "acceptance_criteria": acceptance_criteria,
                     "source_path": source_path,
                     "source_encoding": source_encoding,
+                    "task_metadata": task_metadata,
                 }
                 created.append(created_task)
                 self._record_event(
@@ -345,6 +435,7 @@ class TaskBoard:
         priority: int = 50,
         created_by: str = "orchestrator",
         parent_task_id: int | None = None,
+        task_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base = workspace_file(self.root, root or ".")
         if not base.is_dir():
@@ -352,7 +443,8 @@ class TaskBoard:
 
         created: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for path in sorted(base.glob(pattern or "**/*")):
+        glob_pattern = self._inventory_pattern(pattern)
+        for path in sorted(base.glob(glob_pattern)):
             if not path.is_file() or path.is_symlink():
                 continue
             relative = path.relative_to(self.root)
@@ -361,17 +453,36 @@ class TaskBoard:
             if str(relative) in seen:
                 continue
             seen.add(str(relative))
+            derived_metadata = self._derive_file_task_metadata(relative.as_posix())
+            derived_metadata.update(self._coerce_task_metadata(task_metadata))
+            placeholders = {
+                "source_path": relative.as_posix(),
+                **derived_metadata,
+            }
+            try:
+                description = description_template.format(**placeholders)
+            except KeyError:
+                description = description_template.format(source_path=relative.as_posix())
+            description = description.strip()
+            target_path = str(derived_metadata.get("target_path") or "").strip()
+            reference_paths = [str(item).strip() for item in (derived_metadata.get("reference_paths") or []) if str(item).strip()]
+            if target_path and reference_paths:
+                description += (
+                    f" Save the main artifact to '{target_path}' and use reference file "
+                    f"'{reference_paths[0]}' exactly where applicable."
+                )
             created.append(
                 {
                     "task_key": f"FILE-{relative.as_posix().replace('/', '-').replace('.', '_')}",
                     "parent_task_id": parent_task_id,
                     "title": f"{title_prefix} {relative.as_posix()}",
-                    "description": description_template.format(source_path=relative.as_posix()),
+                    "description": description,
                     "task_type": task_type,
                     "priority": priority,
                     "suggested_agent": suggested_agent,
                     "acceptance_criteria": acceptance_criteria,
                     "source_path": relative.as_posix(),
+                    "task_metadata": derived_metadata,
                 }
             )
 
@@ -920,7 +1031,7 @@ class TaskBoard:
                 for row in db.execute(
                     """
                     SELECT id, task_key, title, description, task_type, assigned_agent,
-                           result_summary, evidence, validation_notes, artifacts
+                           result_summary, evidence, validation_notes, artifacts, task_metadata
                     FROM tasks
                     WHERE status = 'validated'
                     ORDER BY priority ASC, id ASC
