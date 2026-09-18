@@ -78,11 +78,17 @@ class SemanticMemoryIndex:
             )
 
     def add_message(self, session_id: str, message_id: int, text: str) -> bool:
+        return self.add_document(
+            doc_id=f"{session_id}::{message_id}",
+            text=text,
+            metadata={"session_id": session_id, "message_id": int(message_id)},
+        )
+
+    def add_document(self, doc_id: str, text: str, metadata: Dict[str, Any] | None = None) -> bool:
         if not text or not self.available or self.collection is None:
             return False
 
         try:
-            doc_id = f"{session_id}::{message_id}"
             existing = self.collection.get(ids=[doc_id], include=[])
             if existing and existing.get("ids"):
                 return True
@@ -91,7 +97,7 @@ class SemanticMemoryIndex:
                 documents=[text],
                 embeddings=[_embed_text(text)],
                 ids=[doc_id],
-                metadatas=[{"session_id": session_id, "message_id": int(message_id)}],
+                metadatas=[dict(metadata or {})],
             )
             return True
         except Exception as exc:
@@ -153,11 +159,8 @@ class SemanticMemoryIndex:
             return []
 
         matches: List[Dict[str, Any]] = []
-        for document, metadata, distance in zip(
-            results.get("documents", [[]])[0],
-            results.get("metadatas", [[]])[0],
-            results.get("distances", [[]])[0],
-        ):
+        for match in self.search_documents(query=query, limit=limit):
+            metadata = match.get("metadata") or {}
             if not metadata:
                 continue
             if metadata.get("session_id") != current_session_id:
@@ -166,9 +169,44 @@ class SemanticMemoryIndex:
                 {
                     "session_id": metadata.get("session_id"),
                     "message_id": metadata.get("message_id"),
-                    "payload": {"content": document},
-                    "score": float(distance),
+                    "payload": {"content": match.get("document", "")},
+                    "score": float(match.get("score", 0.0)),
                 }
             )
 
+        return matches
+
+    def search_documents(
+        self,
+        query: str,
+        limit: int = 5,
+        where: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
+        if not self.available or self.collection is None or not query:
+            return []
+
+        try:
+            results = self.collection.query(
+                query_embeddings=[_embed_text(query)],
+                n_results=limit,
+                include=["documents", "metadatas", "distances"],
+                where=where,
+            )
+        except Exception as exc:
+            self._disable(f"semantic query failed: {type(exc).__name__}: {exc}")
+            return []
+
+        matches: List[Dict[str, Any]] = []
+        for document, metadata, distance in zip(
+            results.get("documents", [[]])[0],
+            results.get("metadatas", [[]])[0],
+            results.get("distances", [[]])[0],
+        ):
+            matches.append(
+                {
+                    "document": document,
+                    "metadata": metadata or {},
+                    "score": float(distance),
+                }
+            )
         return matches

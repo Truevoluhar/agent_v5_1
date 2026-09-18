@@ -267,6 +267,56 @@ class TaskBoardTests(unittest.TestCase):
         self.assertTrue(current["ok"])
         self.assertIn("TASK-FALLBACK", current["output"])
 
+    def test_inventory_skips_binary_files_by_default(self):
+        source_dir = self.root / "mixed"
+        source_dir.mkdir()
+        (source_dir / "a.py").write_text("print('ok')\n", encoding="utf-8")
+        (source_dir / "b.bin").write_bytes(b"\x00\x01\x02\x03")
+
+        result = self.board.inventory(
+            root="mixed",
+            pattern="**/*",
+            task_type="analysis",
+            title_prefix="Inspect",
+            description_template="Inspect {source_path}",
+            acceptance_criteria=["Inspected"],
+            suggested_agent="PROGRAMMER",
+            priority=5,
+        )
+
+        self.assertEqual(result["discovered"], 1)
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["skipped_binary"], 1)
+        task = self.board.next_ready()
+        self.assertEqual(task["source_path"], "mixed/a.py")
+
+    def test_task_memory_remember_and_recall(self):
+        self.board.add_tasks(
+            [
+                {
+                    "task_key": "TASK-MEM",
+                    "title": "Remember work",
+                    "description": "Store durable findings",
+                    "task_type": "analysis",
+                    "priority": 1,
+                }
+            ]
+        )
+        task = self.board.next_ready()
+        self.board.begin_task(task["id"], "PLANNER", "Inspect and remember")
+        saved = self.board.remember(
+            task["id"],
+            content="Discovered that module loader expects relative imports only.",
+            note_type="finding",
+            agent_name="PLANNER",
+        )
+        recalled = self.board.recall(query="relative imports", task_id=task["id"], limit=5)
+
+        self.assertEqual(saved["task_key"], "TASK-MEM")
+        self.assertTrue(recalled["semantic_matches"] or recalled["lexical_matches"])
+        all_matches = recalled["semantic_matches"] + recalled["lexical_matches"]
+        self.assertTrue(any("relative imports" in match["content"].lower() for match in all_matches))
+
     def test_inventory_and_read_source_support_large_file_sets(self):
         project = self.root / "project"
         project.mkdir()
@@ -383,7 +433,8 @@ class TaskBoardTests(unittest.TestCase):
         )
         self.assertEqual(created[0]["task_metadata"]["entity_name"], "AD576_AD5761S")
         self.assertEqual(created[0]["task_metadata"]["group_name"], "AD576")
-        self.assertEqual(created[0]["task_metadata"]["target_path"], "AD576_AD5761S/README.md")
+        self.assertEqual(created[0]["task_metadata"]["target_dir"], "AD576/AD576_AD5761S")
+        self.assertEqual(created[0]["task_metadata"]["target_path"], "AD576/AD576_AD5761S/README.md")
         self.assertEqual(created[0]["task_metadata"]["reference_paths"], ["TEMPLATE_README.md"])
 
     def test_add_tasks_normalizes_dependency_key_casing(self):

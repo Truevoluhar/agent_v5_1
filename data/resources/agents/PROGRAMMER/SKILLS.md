@@ -27,9 +27,11 @@ when the task cannot proceed.
 For large file sets, prefer:
 
 * `workspace_fs(action='extract_zip')` for archive extraction,
+* `workspace_fs(action='snapshot')` for one-call workspace inspection,
 * `workspace_fs(action='list_tree')` for structure inspection,
 * `task_board(action='inventory')` to seed one task per file,
 * `task_board(action='read_source')` for bounded source reads,
+* `task_board(action='remember')` and `task_board(action='recall')` for durable handoff notes,
 * `workspace_fs(action='write_text')` for README generation.
 
 Do not loop over hundreds of files with `run_shell` when a dedicated tool can do it in one call.

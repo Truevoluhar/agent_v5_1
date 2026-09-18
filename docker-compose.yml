@@ -7,9 +7,8 @@ services:
       - .env
     environment:
       - AGENT_DATA_ROOT=/data
-      # Chroma otherwise downloads an ONNX model on first message. Keep the
-      # container fully offline-capable; SQLite/lexical memory remains active.
-      - AGENT_SEMANTIC_MEMORY=disabled
+      - AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-/app/agent/config.yml}
+      - AGENT_SEMANTIC_MEMORY=${AGENT_SEMANTIC_MEMORY:-auto}
 
       - VLLM_CA_BUNDLE=/app/certs/ZPIZCA.pem
       - CLIENT_CERT=/app/client_certs/server.crt
@@ -30,12 +29,13 @@ services:
   agent-api:
     build:
       context: .
-      dockerfile: service/Dockerfile
+      dockerfile: chat/Dockerfile
     env_file:
       - .env
     environment:
       - AGENT_DATA_ROOT=/data
-      - AGENT_SEMANTIC_MEMORY=disabled
+      - AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-/app/agent/config.yml}
+      - AGENT_SEMANTIC_MEMORY=${AGENT_SEMANTIC_MEMORY:-auto}
       - VLLM_CA_BUNDLE=/app/certs/ZPIZCA.pem
       - CLIENT_CERT=/app/client_certs/server.crt
       - CLIENT_KEY=/app/client_certs/server.key

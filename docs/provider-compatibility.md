@@ -21,11 +21,11 @@ name**, not a secret value. OpenAI uses `OPENAI_API_KEY`; the internal profile u
 Set that variable to the internal server's token (or a nonempty placeholder if
 that server does not require authentication).
 
-To switch the service, set these variables and restart it:
+To switch the chat service or CLI, set these variables and restart it:
 
 ```bash
 export AGENT_CONFIG_PATH=agent/config_vllm.yml
-python -m service.api
+python -m chat.api
 ```
 
 The CLI honors the same `AGENT_CONFIG_PATH`. Alternatively, copy the desired
@@ -101,10 +101,12 @@ container without external DNS can run normally. Durable SQLite session history,
 recent-message context, summaries, and lexical retrieval remain available.
 
 Set `AGENT_SEMANTIC_MEMORY=auto` after making the embedding model available to the
-container if vector retrieval is wanted. In auto mode, initialization, embedding,
-or query failures disable vector retrieval for that process and emit one warning;
-they no longer fail the run. `enabled` has the same runtime fallback but warns
-when Chroma is not installed.
+container if vector retrieval is wanted. The Compose file now defaults to `auto`
+for both the CLI and chat service, while runtime failures still fall back to
+SQLite and lexical retrieval. In auto mode, initialization, embedding, or query
+failures disable vector retrieval for that process and emit one warning; they no
+longer fail the run. `enabled` has the same runtime fallback but warns when
+Chroma is not installed.
 
 ## Docker bridge without outbound access
 

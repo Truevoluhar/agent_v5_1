@@ -9,7 +9,13 @@ from pydantic import ValidationError
 
 from agent.execution import BudgetExhausted
 from agent.orchestrator_agent import create_orchestrator_response
-from agent.runner import AgentRunner, _requires_bootstrap_before_dispatch
+from agent.runner import (
+    AgentRunner,
+    _auto_submit_completed_artifact_task,
+    _auto_submit_seed_task,
+    _cleanup_redundant_collection_tasks,
+    _requires_bootstrap_before_dispatch,
+)
 from agent.tools.tools_registry import execute_registered_tool
 from agent.work_queue import TaskBoard
 
@@ -275,6 +281,179 @@ class RunnerScaleTests(unittest.TestCase):
             )
             aggregate = board.get_task(task_key="GENERATE_READMES")
             self.assertTrue(_requires_bootstrap_before_dispatch(board, aggregate))
+
+    def test_runtime_scaffold_does_not_duplicate_extract_tasks(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            with zipfile.ZipFile(root / "source_bundle.zip", "w") as zf:
+                zf.writestr("demo.py", "print('ok')\n")
+            board = TaskBoard(workspace, "test")
+            runner = AgentRunner.__new__(AgentRunner)
+            emitter = SimpleNamespace(emit=lambda *args, **kwargs: None)
+            worker = SimpleNamespace(name="PROGRAMMER")
+
+            runner._ensure_runtime_scaffold(
+                board=board,
+                objective="Extract the zip and create a README for each file.",
+                agents=[worker],
+                agent_workspace=workspace,
+                emitter=emitter,
+            )
+            runner._ensure_runtime_scaffold(
+                board=board,
+                objective="Extract the zip and create a README for each file.",
+                agents=[worker],
+                agent_workspace=workspace,
+                emitter=emitter,
+            )
+
+            tasks = board.list_tasks(limit=50)
+            extract_keys = [task["task_key"] for task in tasks if task["task_key"].startswith("EXTRACT-SOURCE_BUNDLE")]
+            self.assertEqual(extract_keys, ["EXTRACT-SOURCE_BUNDLE"])
+
+    def test_runtime_scaffold_still_adds_seed_task_when_llm_added_bad_inventory_task(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            extracted = root / "extracted" / "source_bundle"
+            extracted.mkdir(parents=True)
+            (extracted / "demo.py").write_text("print('ok')\n", encoding="utf-8")
+            board = TaskBoard(workspace, "test")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "TASK-INVENTORY-BAD",
+                        "title": "Inventory extracted files",
+                        "description": "Inventory files from source_bundle_extracted.",
+                        "task_type": "analysis",
+                        "priority": 20,
+                    }
+                ]
+            )
+            runner = AgentRunner.__new__(AgentRunner)
+            emitter = SimpleNamespace(emit=lambda *args, **kwargs: None)
+            worker = SimpleNamespace(name="PROGRAMMER")
+
+            runner._ensure_runtime_scaffold(
+                board=board,
+                objective="Extract the zip and create a README for each file.",
+                agents=[worker],
+                agent_workspace=workspace,
+                emitter=emitter,
+            )
+
+            seed_keys = [task["task_key"] for task in board.list_tasks(limit=50) if task["task_key"].startswith("SEED-")]
+            self.assertIn("SEED-EXTRACTED", seed_keys)
+
+    def test_auto_submit_completed_artifact_task_recovers_worker_output(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            (root / "TEMPLATE_README.md").write_text("# Template\n", encoding="utf-8")
+            source_dir = root / "src"
+            source_dir.mkdir()
+            (source_dir / "PROJ00__MODULE_00.py").write_text("print('ok')\n", encoding="utf-8")
+            board = TaskBoard(workspace, "test")
+            created = board.add_tasks(
+                [
+                    {
+                        "task_key": "FILE-SRC-PROJ00__MODULE_00_PY",
+                        "title": "Generate README",
+                        "description": "Create README for file",
+                        "task_type": "documentation",
+                        "priority": 1,
+                        "source_path": "src/PROJ00__MODULE_00.py",
+                    }
+                ]
+            )
+            task = board.next_ready()
+            board.begin_task(task["id"], "PROGRAMMER", "Create the README")
+            board.read_source(task["id"], max_chars=4000)
+            target_path = created[0]["task_metadata"]["target_path"]
+            (root / target_path).parent.mkdir(parents=True, exist_ok=True)
+            (root / target_path).write_text("# README\n", encoding="utf-8")
+
+            updated = _auto_submit_completed_artifact_task(
+                board,
+                board.get_task(task_id=task["id"]),
+                "PROGRAMMER",
+            )
+
+            self.assertEqual(updated["status"], "reported")
+            self.assertEqual(updated["artifacts"][0]["path"], target_path)
+
+    def test_auto_submit_seed_task_recovers_missing_submit(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            source_dir = root / "extracted"
+            source_dir.mkdir()
+            (source_dir / "demo.py").write_text("print('ok')\n", encoding="utf-8")
+            board = TaskBoard(workspace, "test")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "SEED-FILES",
+                        "title": "Seed file tasks",
+                        "description": "Inventory files and seed one task per file.",
+                        "task_type": "coordination",
+                        "priority": 1,
+                    }
+                ]
+            )
+            seed = board.next_ready()
+            board.begin_task(seed["id"], "PROGRAMMER", "Inventory the extracted files")
+            board.inventory(
+                root="extracted",
+                pattern="**/*",
+                task_type="analysis",
+                title_prefix="Analyze",
+                description_template="Analyze {source_path}",
+                acceptance_criteria=["Analyzed"],
+                suggested_agent="PROGRAMMER",
+                priority=10,
+            )
+
+            updated = _auto_submit_seed_task(board, board.get_task(task_id=seed["id"]), "PROGRAMMER")
+
+            self.assertEqual(updated["status"], "reported")
+            self.assertIn("Seeded", updated["result_summary"])
+
+    def test_cleanup_redundant_collection_tasks_cancels_seed_and_broad_parents(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            (root / "src").mkdir()
+            (root / "src" / "demo.py").write_text("print('ok')\n", encoding="utf-8")
+            board = TaskBoard(workspace, "test")
+            board.add_tasks(
+                [
+                    {
+                        "task_key": "SEED-FILES",
+                        "title": "Seed file tasks",
+                        "description": "Inventory files and seed one task per file.",
+                        "task_type": "coordination",
+                        "priority": 1,
+                    },
+                    {
+                        "task_key": "GENERATE-ALL",
+                        "title": "Generate README for each file",
+                        "description": "Create a README for every file in the workspace.",
+                        "task_type": "implementation",
+                        "priority": 2,
+                    },
+                    {
+                        "task_key": "FILE-SRC-DEMO_PY",
+                        "title": "Analyze src/demo.py",
+                        "description": "Analyze a concrete file.",
+                        "task_type": "documentation",
+                        "priority": 3,
+                        "source_path": "src/demo.py",
+                    },
+                ]
+            )
+
+            cancelled = _cleanup_redundant_collection_tasks(board)
+
+            self.assertEqual(cancelled, 2)
+            self.assertEqual(board.get_task(task_key="SEED-FILES")["status"], "cancelled")
+            self.assertEqual(board.get_task(task_key="GENERATE-ALL")["status"], "cancelled")
 
     def test_invalid_orchestrator_delegation_falls_back_to_first_ready_task(self):
         with tempfile.TemporaryDirectory() as workspace:

@@ -9,6 +9,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from agent.semantic_memory import SemanticMemoryIndex
+
 
 TERMINAL_STATUSES = {"validated", "cancelled"}
 
@@ -29,14 +31,24 @@ def digest(path: str | Path) -> str:
     return h.hexdigest()
 
 
+def read_sample(path: str | Path, max_bytes: int = 32768) -> bytes:
+    with Path(path).open("rb") as stream:
+        return stream.read(max_bytes)
+
+
 class TaskBoard:
     """SQLite-backed task state for orchestration, delegation, and validation."""
 
     def __init__(self, workspace: str | Path, scope: str = "default"):
         self.root = Path(workspace).resolve()
+        self.scope = str(scope or "default")
         directory = workspace_file(self.root, ".agent/tasks")
         directory.mkdir(parents=True, exist_ok=True)
-        self.path = directory / (hashlib.sha256(scope.encode("utf-8")).hexdigest() + ".sqlite3")
+        self.path = directory / (hashlib.sha256(self.scope.encode("utf-8")).hexdigest() + ".sqlite3")
+        self.memory = SemanticMemoryIndex(
+            persist_path=str(workspace_file(self.root, ".agent/memory")),
+            collection_name="task_board_memory",
+        )
         with self.connect() as db:
             db.executescript(
                 """
@@ -87,11 +99,24 @@ class TaskBoard:
                     FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS task_notes (
+                    id INTEGER PRIMARY KEY,
+                    task_id INTEGER,
+                    agent_name TEXT,
+                    note_type TEXT NOT NULL DEFAULT 'progress',
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_tasks_status_priority
                 ON tasks(status, priority, id);
 
                 CREATE INDEX IF NOT EXISTS idx_task_events_task
                 ON task_events(task_id, id);
+
+                CREATE INDEX IF NOT EXISTS idx_task_notes_task
+                ON task_notes(task_id, id);
                 """
             )
             self._ensure_task_columns(db)
@@ -265,17 +290,173 @@ class TaskBoard:
         stem = relative.stem or relative.name
         project_code = stem.split("__", 1)[0] if "__" in stem else stem
         entity_name = self._sanitize_folder_name(stem)
+        group_name = self._sanitize_folder_name(project_code)
         template_file = workspace_file(self.root, "TEMPLATE_README.md")
+        target_dir = entity_name if group_name == entity_name else f"{group_name}/{entity_name}"
         metadata: dict[str, Any] = {
             "entity_name": entity_name,
-            "group_name": self._sanitize_folder_name(project_code),
-            "target_dir": entity_name,
-            "target_path": f"{entity_name}/README.md",
+            "group_name": group_name,
+            "target_dir": target_dir,
+            "target_path": f"{target_dir}/README.md",
             "work_type": "document_source_file",
         }
         if template_file.is_file():
             metadata["reference_paths"] = ["TEMPLATE_README.md"]
         return metadata
+
+    def _memory_doc_id(self, prefix: str, identifier: str | int) -> str:
+        return f"{self.scope}::{prefix}::{identifier}"
+
+    def _remember_text(
+        self,
+        *,
+        doc_id: str,
+        text: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        if not text.strip():
+            return
+        self.memory.add_document(doc_id=doc_id, text=text, metadata=metadata)
+
+    def remember(
+        self,
+        task_id: int,
+        *,
+        content: str,
+        note_type: str = "progress",
+        agent_name: str | None = None,
+    ) -> dict[str, Any]:
+        text = str(content or "").strip()
+        if not text:
+            raise ValueError("Memory content is required")
+        task = self.get_task(task_id=task_id)
+        if task is None:
+            raise ValueError("Unknown task")
+        with self.connect() as db:
+            cursor = db.execute(
+                """
+                INSERT INTO task_notes (task_id, agent_name, note_type, content)
+                VALUES (?, ?, ?, ?)
+                """,
+                (task_id, agent_name, note_type, text),
+            )
+            note_id = int(cursor.lastrowid)
+            self._record_event(
+                db,
+                task_id=task_id,
+                event_type="task.note",
+                agent_name=agent_name,
+                summary=f"Saved {note_type} note for {task['task_key']}",
+                payload={"note_id": note_id, "note_type": note_type},
+            )
+        memory_text = "\n".join(
+            part
+            for part in [
+                f"Task {task['task_key']}: {task['title']}",
+                f"Status: {task['status']}",
+                f"Source: {task.get('source_path') or 'n/a'}",
+                f"Note type: {note_type}",
+                text,
+            ]
+            if part
+        )
+        self._remember_text(
+            doc_id=self._memory_doc_id("task_note", note_id),
+            text=memory_text,
+            metadata={
+                "scope": self.scope,
+                "task_id": int(task_id),
+                "task_key": task["task_key"],
+                "note_id": note_id,
+                "note_type": note_type,
+                "agent_name": agent_name or "",
+            },
+        )
+        return {
+            "note_id": note_id,
+            "task_id": int(task_id),
+            "task_key": task["task_key"],
+            "note_type": note_type,
+            "content": text,
+        }
+
+    def recall(
+        self,
+        *,
+        query: str,
+        task_id: int | None = None,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        text = str(query or "").strip()
+        if not text:
+            raise ValueError("Recall query is required")
+        limit = max(1, min(int(limit), 20))
+        task_filter = int(task_id) if task_id is not None else None
+        semantic_matches = [
+            match
+            for match in self.memory.search_documents(query=text, limit=max(limit * 2, 6))
+            if (match.get("metadata") or {}).get("scope") == self.scope
+        ]
+        if task_filter is not None:
+            semantic_matches = [
+                match for match in semantic_matches if int((match.get("metadata") or {}).get("task_id") or -1) == task_filter
+            ]
+        semantic_rows = [
+            {
+                "task_id": (match.get("metadata") or {}).get("task_id"),
+                "task_key": (match.get("metadata") or {}).get("task_key"),
+                "note_id": (match.get("metadata") or {}).get("note_id"),
+                "note_type": (match.get("metadata") or {}).get("note_type"),
+                "agent_name": (match.get("metadata") or {}).get("agent_name") or None,
+                "content": match.get("document", ""),
+                "score": match.get("score"),
+                "source": "semantic",
+            }
+            for match in semantic_matches[:limit]
+        ]
+        with self.connect() as db:
+            params: list[Any] = [f"%{text}%", f"%{text}%", limit]
+            task_clause = ""
+            if task_filter is not None:
+                task_clause = "AND n.task_id = ?"
+                params = [f"%{text}%", f"%{text}%", task_filter, limit]
+            rows = db.execute(
+                f"""
+                SELECT n.id AS note_id,
+                       n.task_id,
+                       t.task_key,
+                       n.note_type,
+                       n.agent_name,
+                       n.content,
+                       n.created_at
+                FROM task_notes n
+                LEFT JOIN tasks t ON t.id = n.task_id
+                WHERE (n.content LIKE ? OR t.task_key LIKE ?)
+                  {task_clause}
+                ORDER BY n.id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        lexical_rows = [
+            {
+                "task_id": row["task_id"],
+                "task_key": row["task_key"],
+                "note_id": row["note_id"],
+                "note_type": row["note_type"],
+                "agent_name": row["agent_name"],
+                "content": row["content"],
+                "created_at": row["created_at"],
+                "source": "sqlite",
+            }
+            for row in rows
+        ]
+        return {
+            "query": text,
+            "task_id": task_filter,
+            "semantic_matches": semantic_rows,
+            "lexical_matches": lexical_rows,
+        }
 
     def _refresh_ready_states(self) -> None:
         with self.connect() as db:
@@ -385,7 +566,7 @@ class TaskBoard:
                     if not path.is_file():
                         raise ValueError(f"Source file not found: {source_path}")
                     source_hash = digest(path)
-                    source_encoding = self._detect_text_encoding(path.read_bytes()[:32768])
+                    source_encoding = self._detect_text_encoding(read_sample(path))
                     derived_metadata = self._derive_file_task_metadata(source_path)
                 task_metadata = dict(derived_metadata)
                 task_metadata.update(self._coerce_task_metadata(task.get("task_metadata")))
@@ -457,6 +638,7 @@ class TaskBoard:
         created_by: str = "orchestrator",
         parent_task_id: int | None = None,
         task_metadata: dict[str, Any] | None = None,
+        include_binary: bool = False,
     ) -> dict[str, Any]:
         base = workspace_file(self.root, root or ".")
         if not base.is_dir():
@@ -464,6 +646,7 @@ class TaskBoard:
 
         created: list[dict[str, Any]] = []
         seen: set[str] = set()
+        skipped_binary = 0
         glob_pattern = self._inventory_pattern(pattern)
         for path in sorted(base.glob(glob_pattern)):
             if not path.is_file() or path.is_symlink():
@@ -471,7 +654,13 @@ class TaskBoard:
             relative = path.relative_to(self.root)
             if self._is_excluded_path(relative):
                 continue
+            if relative.name.upper().startswith("TEMPLATE_"):
+                continue
             if str(relative) in seen:
+                continue
+            encoding = self._detect_text_encoding(read_sample(path))
+            if encoding is None and not include_binary:
+                skipped_binary += 1
                 continue
             seen.add(str(relative))
             derived_metadata = self._derive_file_task_metadata(relative.as_posix())
@@ -516,7 +705,12 @@ class TaskBoard:
             }
         filtered = [task for task in created if task["source_path"] not in existing_sources]
         added = self.add_tasks(filtered, created_by=created_by) if filtered else []
-        return {"added": len(added), "discovered": len(created), "summary": self.summary()}
+        return {
+            "added": len(added),
+            "discovered": len(created),
+            "skipped_binary": skipped_binary,
+            "summary": self.summary(),
+        }
 
     def list_tasks(self, statuses: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
         self._refresh_ready_states()
@@ -631,7 +825,27 @@ class TaskBoard:
                 summary=f"Assigned {row['task_key']} to {agent_name}",
                 payload={"instructions": instructions},
             )
-        return self.get_task(task_id=task_id) or {}
+        task = self.get_task(task_id=task_id) or {}
+        if task:
+            self._remember_text(
+                doc_id=self._memory_doc_id("assignment", task_id),
+                text="\n".join(
+                    [
+                        f"Task {task['task_key']} assigned to {agent_name}.",
+                        f"Title: {task['title']}",
+                        f"Description: {task['description']}",
+                        f"Instructions: {instructions}",
+                    ]
+                ),
+                metadata={
+                    "scope": self.scope,
+                    "task_id": task_id,
+                    "task_key": task["task_key"],
+                    "note_type": "assignment",
+                    "agent_name": agent_name,
+                },
+            )
+        return task
 
     def read_source(self, task_id: int, max_chars: int = 4000) -> dict[str, Any]:
         if not 4 <= max_chars <= 12000:
@@ -660,7 +874,7 @@ class TaskBoard:
                 raise ValueError("Source changed since task creation; reopen the task to refresh it")
             encoding = row["source_encoding"]
             if not encoding:
-                encoding = self._detect_text_encoding(path.read_bytes()[:32768])
+                encoding = self._detect_text_encoding(read_sample(path))
                 if not encoding:
                     raise ValueError("Binary or unsupported text file; cannot read source as text")
                 db.execute(
@@ -774,7 +988,30 @@ class TaskBoard:
                     "follow_up_suggestions": follow_up_suggestions,
                 },
             )
-        return self.get_task(task_id=task_id) or {}
+        task = self.get_task(task_id=task_id) or {}
+        if task:
+            self._remember_text(
+                doc_id=self._memory_doc_id("submission", task_id),
+                text="\n".join(
+                    part
+                    for part in [
+                        f"Task {task['task_key']} submitted by {agent_name or task.get('assigned_agent') or 'worker'}.",
+                        f"Summary: {summary}",
+                        f"Evidence: {evidence}",
+                        f"Artifacts: {', '.join(item['path'] for item in records) if records else 'none'}",
+                        f"Follow-up: {follow_up_suggestions}" if follow_up_suggestions.strip() else "",
+                    ]
+                    if part
+                ),
+                metadata={
+                    "scope": self.scope,
+                    "task_id": task_id,
+                    "task_key": task["task_key"],
+                    "note_type": "submission",
+                    "agent_name": agent_name or task.get("assigned_agent") or "",
+                },
+            )
+        return task
 
     def block(self, task_id: int, reason: str, agent_name: str | None = None) -> dict[str, Any]:
         if not reason.strip():
@@ -806,7 +1043,20 @@ class TaskBoard:
                 summary=f"Task {row['task_key']} blocked",
                 payload={"reason": reason},
             )
-        return self.get_task(task_id=task_id) or {}
+        task = self.get_task(task_id=task_id) or {}
+        if task:
+            self._remember_text(
+                doc_id=self._memory_doc_id("block", task_id),
+                text=f"Task {task['task_key']} blocked. Reason: {reason}",
+                metadata={
+                    "scope": self.scope,
+                    "task_id": task_id,
+                    "task_key": task["task_key"],
+                    "note_type": "blocker",
+                    "agent_name": agent_name or task.get("assigned_agent") or "",
+                },
+            )
+        return task
 
     def reopen(self, task_id: int, notes: str = "") -> dict[str, Any]:
         with self.connect() as db:
@@ -840,7 +1090,7 @@ class TaskBoard:
                 (
                     notes or None,
                     digest(workspace_file(self.root, row["source_path"])) if row["source_path"] else None,
-                    self._detect_text_encoding(workspace_file(self.root, row["source_path"]).read_bytes()[:32768])
+                    self._detect_text_encoding(read_sample(workspace_file(self.root, row["source_path"])))
                     if row["source_path"] else None,
                     task_id,
                 ),

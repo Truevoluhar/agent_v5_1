@@ -25,6 +25,9 @@ def task_board_executor(
     parent_task_id=None,
     scope="default",
     task_metadata=None,
+    note_type="progress",
+    query="",
+    include_binary=False,
 ):
     board = TaskBoard(workspace, scope)
     artifacts = list(artifacts or [])
@@ -55,6 +58,7 @@ def task_board_executor(
             created_by="worker",
             parent_task_id=parent_task_id if parent_task_id is not None else task_id,
             task_metadata=task_metadata,
+            include_binary=bool(include_binary),
         )
     elif action == "read_source":
         if task_id is None:
@@ -83,6 +87,19 @@ def task_board_executor(
         result = board.reopen(int(task_id), text or summary or evidence)
     elif action == "verify":
         result = board.verify()
+    elif action == "remember":
+        if task_id is None:
+            current = board.active_task()
+            if not current:
+                raise ValueError("task_id is required when there is no active task")
+            task_id = int(current["id"])
+        result = board.remember(
+            int(task_id),
+            content=text or summary or evidence,
+            note_type=note_type,
+        )
+    elif action == "recall":
+        result = board.recall(query=query or text or summary, task_id=task_id, limit=int(limit))
     else:
         raise ValueError("Unknown task board action")
 
@@ -96,6 +113,7 @@ TASK_BOARD_TOOL = Tool(
         "Use current/get/status/list to inspect task state. "
         "Use inventory to seed one durable task per file for large document or code collections. "
         "Use read_source to read a file task in bounded chunks until eof=true. "
+        "Use remember/recall for durable task handoff notes and resumable context. "
         "Use submit to report a finished delegated task with summary, evidence, and artifact paths. "
         "Use block when the task cannot proceed. Use reopen only when retrying a returned task. "
         "verify checks that previously validated artifacts still exist."
@@ -105,7 +123,7 @@ TASK_BOARD_TOOL = Tool(
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["status", "current", "next", "get", "list", "inventory", "read_source", "submit", "block", "reopen", "verify"],
+                "enum": ["status", "current", "next", "get", "list", "inventory", "read_source", "submit", "block", "reopen", "verify", "remember", "recall"],
             },
             "task_id": {"type": ["integer", "null"]},
             "task_key": {"type": ["string", "null"]},
@@ -136,11 +154,15 @@ TASK_BOARD_TOOL = Tool(
                     "additionalProperties": False,
                 },
             },
+            "note_type": {"type": "string"},
+            "query": {"type": "string"},
+            "include_binary": {"type": "boolean"},
         },
         "required": [
             "action", "task_id", "task_key", "summary", "evidence", "text", "artifacts", "limit",
             "root", "pattern", "task_type", "title_prefix", "suggested_agent", "priority",
-            "acceptance_criteria", "max_chars", "parent_task_id", "task_metadata"
+            "acceptance_criteria", "max_chars", "parent_task_id", "task_metadata",
+            "note_type", "query", "include_binary"
         ],
         "additionalProperties": False,
     },

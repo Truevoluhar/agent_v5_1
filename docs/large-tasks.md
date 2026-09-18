@@ -34,6 +34,8 @@ Session history still lives in SQLite, and semantic memory uses Chroma with
 local deterministic embeddings so retrieval works without downloading external
 models. The runner records planning, delegation, worker reports, and validation
 results back into session history so agents can recover where work was left off.
+Task-local handoff notes can also be stored and recalled through
+`task_board(action="remember")` and `task_board(action="recall")`.
 
 Tool transcripts remain under `.agent/tool-results/`. Oversized intermediate
 history is compacted into durable checkpoints that reference the task board and

@@ -22,7 +22,7 @@ from agent.paths import DATA_ROOT
 from agent.response_agent import ResponseAgent
 from agent.session import Session
 from agent.user_storage import user_storage_paths
-from agent.work_queue import TaskBoard
+from agent.work_queue import TaskBoard, read_sample, workspace_file
 
 AGENT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = str(AGENT_ROOT / "config.yml")
@@ -174,10 +174,178 @@ def _has_bootstrap_backlog(board: TaskBoard, current_task_id: int | None = None)
     return False
 
 
+def _has_open_file_backlog(board: TaskBoard, current_task_id: int | None = None) -> bool:
+    open_tasks = board.list_tasks(statuses=["ready", "pending", "in_progress", "reported", "blocked"], limit=500)
+    for item in open_tasks:
+        if current_task_id is not None and int(item.get("id") or 0) == int(current_task_id):
+            continue
+        if item.get("source_path"):
+            return True
+    return False
+
+
 def _requires_bootstrap_before_dispatch(board: TaskBoard, task: dict[str, Any]) -> bool:
-    return _looks_like_collection_wide_task(task) and _has_bootstrap_backlog(
-        board, current_task_id=int(task.get("id") or 0)
+    if not _looks_like_collection_wide_task(task):
+        return False
+    current_task_id = int(task.get("id") or 0)
+    return _has_bootstrap_backlog(board, current_task_id=current_task_id) or _has_open_file_backlog(
+        board, current_task_id=current_task_id
     )
+
+
+def _prompt_implies_collection_work(objective: str) -> bool:
+    text = str(objective or "").lower()
+    markers = (
+        "every file",
+        "each file",
+        "all files",
+        "every document",
+        "each document",
+        "all documents",
+        "zip",
+        "archive",
+        "readme for each",
+        "for each file",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _runtime_task_key(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(value or "").upper())
+    cleaned = cleaned.strip("-")
+    return cleaned or "TASK"
+
+
+def _detect_workspace_snapshot(workspace: str) -> dict[str, Any]:
+    root = Path(workspace)
+    archives: list[str] = []
+    candidate_dirs: list[str] = []
+    text_files = 0
+    for path in sorted(root.rglob("*")):
+        if any(part in {".agent", ".git", "node_modules", "venv", "__pycache__"} for part in path.parts):
+            continue
+        relative = path.relative_to(root).as_posix()
+        if path.is_file():
+            if path.suffix.lower() == ".zip":
+                archives.append(relative)
+            else:
+                try:
+                    sample = read_sample(path, 4096)
+                except OSError:
+                    continue
+                if TaskBoard._detect_text_encoding(sample) is not None:
+                    text_files += 1
+        elif path.is_dir() and path.name.lower() in {"src", "source", "sources", "extracted", "extracted_docs", "documents"}:
+            candidate_dirs.append(relative)
+    return {
+        "archives": archives,
+        "candidate_dirs": candidate_dirs,
+        "text_files": text_files,
+    }
+
+
+def _auto_submit_completed_artifact_task(
+    board: TaskBoard,
+    task: dict[str, Any] | None,
+    agent_name: str,
+) -> dict[str, Any] | None:
+    if not task or task.get("status") != "in_progress":
+        return task
+    if not task.get("source_path"):
+        return task
+    metadata = task.get("task_metadata") or {}
+    if not isinstance(metadata, dict):
+        return task
+    target_path = str(metadata.get("target_path") or "").strip()
+    if not target_path:
+        return task
+    source_path = workspace_file(board.root, str(task["source_path"]))
+    artifact_path = workspace_file(board.root, target_path)
+    if not source_path.is_file() or not artifact_path.is_file():
+        return task
+    if int(task.get("source_cursor") or 0) < source_path.stat().st_size:
+        return task
+    try:
+        preview = artifact_path.read_text(encoding="utf-8", errors="replace")[:240]
+        board.submit(
+            int(task["id"]),
+            summary=f"Created {target_path} for {Path(task['source_path']).name}.",
+            evidence=(
+                f"Recovered worker output automatically because the artifact already existed. "
+                f"Fully read '{task['source_path']}' and found '{target_path}'. Preview: {preview}"
+            ),
+            artifacts=[target_path],
+            agent_name=agent_name,
+        )
+    except Exception:
+        return task
+    return board.get_task(task_id=int(task["id"]))
+
+
+def _auto_submit_seed_task(
+    board: TaskBoard,
+    task: dict[str, Any] | None,
+    agent_name: str,
+) -> dict[str, Any] | None:
+    if not task or task.get("status") != "in_progress" or task.get("source_path"):
+        return task
+    haystack = " ".join(
+        str(task.get(field) or "") for field in ("task_key", "title", "description")
+    ).lower()
+    if not any(marker in haystack for marker in ("inventory", "seed")):
+        return task
+    file_tasks = [
+        item
+        for item in board.list_tasks(
+            statuses=["ready", "pending", "in_progress", "reported", "blocked", "validated"],
+            limit=1000,
+        )
+        if item.get("source_path")
+    ]
+    if not file_tasks:
+        return task
+    try:
+        board.submit(
+            int(task["id"]),
+            summary=f"Seeded {len(file_tasks)} durable file tasks.",
+            evidence=(
+                f"Recovered worker output automatically because inventory results already exist in the task board. "
+                f"Found {len(file_tasks)} file-backed tasks after inventory/seeding work."
+            ),
+            artifacts=[],
+            agent_name=agent_name,
+        )
+    except Exception:
+        return task
+    return board.get_task(task_id=int(task["id"]))
+
+
+def _cleanup_redundant_collection_tasks(board: TaskBoard) -> int:
+    tasks = board.list_tasks(statuses=["ready", "pending", "blocked"], limit=1000)
+    file_tasks = [item for item in tasks if item.get("source_path")]
+    if not file_tasks:
+        return 0
+    cancelled = 0
+    for task in tasks:
+        if task.get("source_path"):
+            continue
+        haystack = " ".join(
+            str(task.get(field) or "") for field in ("task_key", "title", "description")
+        ).lower()
+        if any(marker in haystack for marker in ("inventory", "seed")):
+            board.cancel(
+                int(task["id"]),
+                "Redundant coordination task cancelled because durable file tasks already exist.",
+            )
+            cancelled += 1
+            continue
+        if _looks_like_collection_wide_task(task):
+            board.cancel(
+                int(task["id"]),
+                "Broad collection task cancelled because the work has been expanded into durable file tasks.",
+            )
+            cancelled += 1
+    return cancelled
 
 
 def _fallback_orchestrator_decision(
@@ -457,6 +625,7 @@ class AgentRunner:
         retrieval_context = self._build_retrieval_context(session, objective, context_budget)
         if retrieval_context:
             planning_messages.insert(0, {"role": "system", "content": retrieval_context})
+        workspace_snapshot = _detect_workspace_snapshot(str(board.root))
         planning_messages.append(
             {
                 "role": "user",
@@ -469,6 +638,9 @@ class AgentRunner:
                     "then create a follow-up task whose explicit job is to call "
                     "task_board(action='inventory') so the runtime can seed one durable file task per discovered file. "
                     "Do not guess or pre-create many file-specific tasks before the relevant files are actually known. "
+                    "Current workspace snapshot:\n"
+                    + json.dumps(workspace_snapshot, ensure_ascii=False)
+                    + "\n"
                     "Current objective:\n" + objective
                 ),
             }
@@ -501,6 +673,124 @@ class AgentRunner:
             "orchestrator.decision",
             {"action": "plan_tasks", "task_count": len(created), "description": plan.summary},
         )
+
+    def _ensure_runtime_scaffold(
+        self,
+        *,
+        board: TaskBoard,
+        objective: str,
+        agents: list[GenericAgent],
+        agent_workspace: str,
+        emitter: EventEmitter,
+    ) -> None:
+        if not _prompt_implies_collection_work(objective):
+            return
+
+        snapshot = _detect_workspace_snapshot(agent_workspace)
+        preferred_agent = None
+        for candidate in ("PROGRAMMER", "PLANNER"):
+            preferred_agent = _find_agent_by_name(agents, candidate)
+            if preferred_agent is not None:
+                break
+        if preferred_agent is None and agents:
+            preferred_agent = agents[0]
+        suggested_agent = preferred_agent.name if preferred_agent is not None else None
+
+        existing = board.list_tasks(limit=500)
+        existing_keys = {str(item.get("task_key") or "") for item in existing}
+        source_tasks_exist = any(item.get("source_path") for item in existing)
+
+        scaffold_tasks: list[dict[str, Any]] = []
+        extract_keys: list[str] = []
+        archive_roots: list[str] = []
+        for archive in snapshot["archives"]:
+            task_key = _runtime_task_key(f"EXTRACT-{Path(archive).stem}")
+            extract_keys.append(task_key)
+            archive_root = f"extracted/{Path(archive).stem}"
+            archive_roots.append(archive_root)
+            if task_key in existing_keys:
+                continue
+            scaffold_tasks.append(
+                {
+                    "task_key": task_key,
+                    "title": f"Extract archive {archive}",
+                    "description": (
+                        f"Extract '{archive}' into '{archive_root}' using workspace_fs(action='extract_zip'). "
+                        "Do not extract the same archive into multiple destinations."
+                    ),
+                    "task_type": "implementation",
+                    "priority": 1,
+                    "suggested_agent": suggested_agent,
+                    "acceptance_criteria": [f"Archive extracted into {archive_root}"],
+                    "task_metadata": [
+                        {"key": "archive_path", "value": archive, "values": []},
+                        {"key": "extract_destination", "value": archive_root, "values": []},
+                    ],
+                }
+            )
+
+        if scaffold_tasks:
+            created = board.add_tasks(scaffold_tasks, created_by="runtime_scaffold")
+            emitter.emit("orchestrator.decision", {"action": "runtime_scaffold", "task_count": len(created)})
+            existing.extend(created)
+            existing_keys.update(item["task_key"] for item in created)
+
+        if source_tasks_exist:
+            return
+
+        roots = [item for item in snapshot["candidate_dirs"] if item]
+        for archive_root in archive_roots:
+            if archive_root not in roots:
+                roots.append(archive_root)
+        if not roots and snapshot["text_files"] > 0:
+            roots = ["."]
+        if not roots:
+            return
+
+        lower_objective = objective.lower()
+        documentation_mode = "readme" in lower_objective or "template_readme" in lower_objective
+        task_type = "documentation" if documentation_mode else "analysis"
+        title_prefix = "Generate README for" if documentation_mode else "Analyze"
+        acceptance = (
+            ["README.md created", "README saved to target_path"]
+            if documentation_mode
+            else ["Source file analyzed and findings saved or reported"]
+        )
+        for root in roots:
+            normalized_root = root.strip("./") or "workspace"
+            task_key = _runtime_task_key(f"SEED-{normalized_root.replace('/', '-')}")
+            if task_key in existing_keys:
+                continue
+            depends = [key for key in extract_keys if normalized_root.startswith("extracted") or root.startswith("extracted/")]
+            description = (
+                f"Inventory text-like files under '{root}' and create one durable file task per file with "
+                "task_board(action='inventory'). Use include_binary=false and do not create duplicate source tasks."
+            )
+            if documentation_mode:
+                description += " Keep derived target_dir and target_path metadata so workers can write README.md files in project-specific folders."
+            created = board.add_tasks(
+                [
+                    {
+                        "task_key": task_key,
+                        "title": f"Seed file tasks from {root}",
+                        "description": description,
+                        "task_type": "coordination",
+                        "priority": 2,
+                        "depends_on_keys": depends,
+                        "suggested_agent": suggested_agent,
+                        "acceptance_criteria": acceptance,
+                        "task_metadata": [
+                            {"key": "inventory_root", "value": root, "values": []},
+                            {"key": "inventory_pattern", "value": "**/*", "values": []},
+                            {"key": "seed_task_type", "value": task_type, "values": []},
+                            {"key": "seed_title_prefix", "value": title_prefix, "values": []},
+                        ],
+                    }
+                ],
+                created_by="runtime_scaffold",
+            )
+            if created:
+                emitter.emit("orchestrator.decision", {"action": "runtime_scaffold", "task_count": len(created)})
 
     def _review_reported_task(
         self,
@@ -646,6 +936,16 @@ class AgentRunner:
                     emitter=emitter,
                     context_budget=orchestrator_context_budget,
                 )
+                self._ensure_runtime_scaffold(
+                    board=board,
+                    objective=objective,
+                    agents=agents,
+                    agent_workspace=agent_workspace,
+                    emitter=emitter,
+                )
+                cleaned = _cleanup_redundant_collection_tasks(board)
+                if cleaned:
+                    emitter.emit("orchestrator.decision", {"action": "cleanup_redundant_tasks", "task_count": cleaned})
                 max_steps = _recommended_step_budget(max_steps, board.summary())
 
                 coverage = board.verify()
@@ -703,6 +1003,7 @@ class AgentRunner:
                 retrieval_context = self._build_retrieval_context(session, objective, orchestrator_context_budget)
                 if retrieval_context:
                     orchestration_messages.insert(0, {"role": "system", "content": retrieval_context})
+                workspace_snapshot = _detect_workspace_snapshot(agent_workspace)
                 orchestration_messages.append(
                     {
                         "role": "user",
@@ -712,6 +1013,8 @@ class AgentRunner:
                             + objective
                             + "\nTask board summary: "
                             + json.dumps(board.summary(), ensure_ascii=False)
+                            + "\nWorkspace snapshot: "
+                            + json.dumps(workspace_snapshot, ensure_ascii=False)
                             + "\nReady tasks: "
                             + json.dumps(ready_tasks, ensure_ascii=False)
                             + "\nChoose the best next task and the best available agent for it."
@@ -846,6 +1149,8 @@ class AgentRunner:
                             + "\nTask board summary: "
                             + json.dumps(board.summary(), ensure_ascii=False)
                             + "\nComplete only this task. Use task_board(action='current' or 'get') to inspect it. "
+                            + "For large directories prefer workspace_fs(action='snapshot') before many smaller reads. "
+                            + "Use task_board(action='remember') for durable intermediate findings another agent may need. "
                             + "When the work is done, report back with task_board(action='submit') including a concise summary, concrete evidence, and exact artifact paths. "
                             + "If you are blocked, use task_board(action='block') with the real reason."
                         ),
@@ -873,6 +1178,8 @@ class AgentRunner:
                     )
 
                 task_after = board.get_task(task_id=task["id"])
+                task_after = _auto_submit_seed_task(board, task_after, delegated_agent.name)
+                task_after = _auto_submit_completed_artifact_task(board, task_after, delegated_agent.name)
                 if task_after is not None and task_after["status"] == "in_progress":
                     board.block(
                         task["id"],

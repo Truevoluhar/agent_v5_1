@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import zipfile
+from collections import Counter
 from pathlib import Path
 
 from agent.tools.tools_models import Tool, ToolResult
-from agent.work_queue import TaskBoard, workspace_file
+from agent.work_queue import TaskBoard, read_sample, workspace_file
 
 
 def _list_tree(workspace: Path, root: str, pattern: str, max_entries: int) -> ToolResult:
@@ -118,6 +120,66 @@ def _extract_zip(workspace: Path, zip_path: str, destination: str, overwrite: bo
     )
 
 
+def _snapshot(workspace: Path, root: str, max_entries: int) -> ToolResult:
+    base = workspace_file(workspace, root or ".")
+    if not base.exists():
+        return ToolResult(ok=False, output=None, error=f"Path not found: {base}", metadata={})
+
+    files = 0
+    directories = 0
+    archives: list[str] = []
+    candidate_source_dirs: set[str] = set()
+    sample_files: list[str] = []
+    extension_counts: Counter[str] = Counter()
+    text_like_files = 0
+    binary_like_files = 0
+
+    paths = sorted(base.rglob("*")) if base.is_dir() else [base]
+    for path in paths:
+        relative = path.relative_to(workspace)
+        if any(part in {".agent", ".git", "node_modules", "venv", "__pycache__"} for part in relative.parts):
+            continue
+        if path.is_dir():
+            directories += 1
+            name = path.name.lower()
+            if name in {"src", "source", "sources", "extracted", "extracted_docs", "docs", "documents"}:
+                candidate_source_dirs.add(relative.as_posix())
+            continue
+        if not path.is_file() or path.is_symlink():
+            continue
+        files += 1
+        extension_counts[path.suffix.lower() or "<no_ext>"] += 1
+        if len(sample_files) < max_entries:
+            sample_files.append(relative.as_posix())
+        if path.suffix.lower() == ".zip":
+            archives.append(relative.as_posix())
+        encoding = TaskBoard._detect_text_encoding(read_sample(path, 4096))
+        if encoding is None:
+            binary_like_files += 1
+        else:
+            text_like_files += 1
+
+    summary = {
+        "root": base.relative_to(workspace).as_posix() if base != workspace else ".",
+        "exists": True,
+        "is_dir": base.is_dir(),
+        "files": files,
+        "directories": directories,
+        "archives": archives[:20],
+        "archives_truncated": len(archives) > 20,
+        "candidate_source_dirs": sorted(candidate_source_dirs)[:20],
+        "sample_files": sample_files,
+        "extension_counts": dict(extension_counts.most_common(20)),
+        "text_like_files": text_like_files,
+        "binary_like_files": binary_like_files,
+    }
+    return ToolResult(
+        ok=True,
+        output=json.dumps(summary, ensure_ascii=False),
+        metadata={"root": str(base), "files": files, "directories": directories},
+    )
+
+
 def workspace_fs_executor(
     workspace: Path,
     action: str,
@@ -145,6 +207,8 @@ def workspace_fs_executor(
             return _mkdir(workspace_path, path)
         if action == "extract_zip":
             return _extract_zip(workspace_path, zip_path, destination, overwrite)
+        if action == "snapshot":
+            return _snapshot(workspace_path, root, max_entries)
         return ToolResult(ok=False, output=None, error="Unknown workspace_fs action", metadata={})
     except Exception as exc:
         return ToolResult(ok=False, output=None, error=str(exc), metadata={})
@@ -154,12 +218,12 @@ WORKSPACE_FS_TOOL = Tool(
     name="workspace_fs",
     description=(
         "Safe workspace filesystem helper. Prefer this over run_shell for bulk archive extraction, "
-        "directory listing, bounded text reads, directory creation, and writing text files."
+        "compact workspace snapshots, directory listing, bounded text reads, directory creation, and writing text files."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["list_tree", "read_text", "write_text", "mkdir", "extract_zip"]},
+            "action": {"type": "string", "enum": ["list_tree", "read_text", "write_text", "mkdir", "extract_zip", "snapshot"]},
             "path": {"type": "string"},
             "content": {"type": "string"},
             "root": {"type": "string"},

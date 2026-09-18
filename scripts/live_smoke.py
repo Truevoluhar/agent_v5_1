@@ -1,11 +1,12 @@
-"""Opt-in live model integration check using a synthetic ZIP in a temporary workspace.
+"""Opt-in live integration check using a synthetic ZIP and the durable task board.
 
-Usage: python scripts/live_smoke.py --config agent/config.yml
+Usage: python scripts/live_smoke.py --config agent/config.yml --files 20
 This makes billable calls to the configured provider; never runs during unit tests.
 """
+from __future__ import annotations
+
 import argparse
 import json
-import re
 from pathlib import Path
 import sys
 import tempfile
@@ -15,79 +16,133 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent.runner import AgentRunner, RunRequest
-from agent.work_queue import WorkQueue
+from agent.work_queue import TaskBoard
 
 
-def main():
+def _build_fixture(workspace: Path, files: int) -> list[str]:
+    expected_paths: list[str] = []
+    with zipfile.ZipFile(workspace / "source_bundle.zip", "w") as archive:
+        for idx in range(files):
+            group = f"PROJ{idx % 4:02d}"
+            module = f"{group}__MODULE_{idx:02d}"
+            archive.writestr(
+                f"{module}.py",
+                (
+                    f"def compute_{idx}(value: int) -> int:\n"
+                    f"    \"\"\"Return value plus {idx}.\"\"\"\n"
+                    f"    return value + {idx}\n"
+                ),
+            )
+            expected_paths.append(f"{group}/{group}_MODULE_{idx:02d}/README.md")
+    (workspace / "TEMPLATE_README.md").write_text(
+        (
+            "# {{entity_name}}\n\n"
+            "## Summary\n\n"
+            "## Behavior\n\n"
+            "## Inputs\n\n"
+            "## Outputs\n\n"
+            "## Example\n\n"
+            "## Notes\n"
+        ),
+        encoding="utf-8",
+    )
+    return expected_paths
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', default='agent/config.yml')
-    parser.add_argument('--files', type=int, default=3)
-    parser.add_argument('--embedding-cache', help='Optional writable Chroma model cache')
+    parser.add_argument("--config", default="agent/config.yml")
+    parser.add_argument("--files", type=int, default=20)
+    parser.add_argument("--embedding-cache", help="Optional writable Chroma model cache")
     args = parser.parse_args()
-    if not 1 <= args.files <= 10:
-        parser.error('--files must be between 1 and 10 for this bounded smoke test')
+    if not 1 <= args.files <= 20:
+        parser.error("--files must be between 1 and 20 for this bounded smoke test")
     if args.embedding_cache:
         from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
+
         ONNXMiniLM_L6_V2.DOWNLOAD_PATH = Path(args.embedding_cache)
-    root = Path(tempfile.mkdtemp(prefix='agent-live-smoke-'))
-    workspace = root / 'workspace'
+    root = Path(tempfile.mkdtemp(prefix="agent-live-smoke-"))
+    workspace = root / "workspace"
     workspace.mkdir()
-    with zipfile.ZipFile(workspace / 'source.zip', 'w') as archive:
-        for n in range(args.files):
-            archive.writestr(f'module_{n}.py', f'def add_{n}(value: int) -> int:\n    """Return value plus {n}."""\n    return value + {n}\n')
+    expected_paths = _build_fixture(workspace, args.files)
     runner = AgentRunner(args.config)
-    runner.config.update(session=str(root / 'sessions'), memory=str(root / 'memory'),
-                         agents_resources=str(Path(__file__).resolve().parents[1] / 'data/resources/agents'),
-                         max_steps=8, max_worker_iterations=25)
-    runner.config['llm'] = {**runner.config.get('llm', {}), 'timeout': 120, 'max_retries': 1}
+    runner.config.update(
+        session=str(root / "sessions"),
+        memory=str(root / "memory"),
+        agents_resources=str(Path(__file__).resolve().parents[1] / "data/resources/agents"),
+        max_steps=48,
+        max_worker_iterations=35,
+    )
+    runner.config["llm"] = {**runner.config.get("llm", {}), "timeout": 180, "max_retries": 1}
     started = time.monotonic()
-    events = []
+    events: list[str] = []
+
     def emit(event):
         events.append(event.type)
-        print('EVENT', event.type, flush=True)
-    def no_input(question):
-        raise RuntimeError('Smoke test unexpectedly requested user input')
-    schema = {'type':'object','additionalProperties':False,'properties':{
-        'summary':{'type':'string'},'documented_files':{'type':'integer'},
-        'artifacts':{'type':'array','items':{'type':'string'}}},
-        'required':['summary','documented_files','artifacts']}
-    expected_paths = [f'docs/module_{n}.py/README.md' for n in range(args.files)]
-    result = runner.run(
-        RunRequest(username='live_smoke', workspace=str(workspace), response_schema=json.dumps(schema),
-                   prompt=f'''The synthetic source.zip in this workspace contains exactly {args.files} Python source files.
-Safely extract it into src/. Create a short PLAN.md and use work_queue inventory on src with pattern **/*.py.
-For every source, claim and read it with work_queue until eof and write docs/<source filename>/README.md.
-Required artifact paths, including the .py directory suffix: {json.dumps(expected_paths)}.
-Each README must identify the function, describe its exact arithmetic and include one correct example.
-Use quoted heredocs to preserve Markdown backticks and read back each saved artifact.
-Verify each artifact and complete each queue item with evidence. Verify final coverage and finish.
-Use only run_shell, work_queue, read_plan and create_or_update_plan. All needed inputs are provided.
-Keep this small task focused. Do not ask for clarification or access anything outside this workspace.'''),
-        emit=emit, wait_for_input=no_input, is_cancelled=lambda: time.monotonic() - started > 480,
+        print("EVENT", event.type, flush=True)
+
+    def no_input(question: str) -> str:
+        raise RuntimeError(f"Smoke test unexpectedly requested user input: {question}")
+
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "summary": {"type": "string"},
+            "readme_count": {"type": "integer"},
+            "artifacts": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["summary", "readme_count", "artifacts"],
+    }
+    prompt = (
+        f"In this workspace there is a zip file named source_bundle.zip containing exactly {args.files} Python files. "
+        "Read and analyze every source file and create a comprehensive README.md for each one. "
+        "Each README must follow TEMPLATE_README.md and must be written into a folder named after the project it refers to. "
+        "Use the SQLite task board as the source of truth, break collection work into extract, inventory, and per-file tasks, "
+        "prefer workspace_fs and task_board over run_shell, and keep artifacts in project-specific folders. "
+        "Do not use PLAN.md."
     )
-    state = WorkQueue(workspace, result.session_id).verify()
-    artifacts = list((workspace / 'docs').rglob('README.md'))
-    # Independent, minimal semantic check specific to this known fixture.
-    artifact_checks = all((workspace / f'docs/module_{n}.py/README.md').is_file()
-                          and re.search(rf'add_{n}\(\d+\)', (workspace / f'docs/module_{n}.py/README.md').read_text())
-                          for n in range(args.files))
-    passed = (result.status == 'completed' and state['counts'] == {'completed':args.files}
-              and len(artifacts) == args.files and artifact_checks
-              and result.final_response is not None
-              and result.final_response.documented_files == args.files
-              and all((workspace / name).is_file() for name in result.final_response.artifacts)
-              and set(expected_paths).issubset(result.final_response.artifacts)
-              and 'tool.completed' in events)
-    report = {'passed':passed,'status':result.status,'error':result.error,
-              'model':runner.config['orchestrator_agent']['model'],
-              'api_mode':runner.config.get('llm', {}).get('api_mode', 'chat_completions'),
-              'coverage':state,'artifact_count':len(artifacts), 'workspace':str(workspace),
-              'elapsed_seconds':round(time.monotonic()-started, 1),
-              'final_response':result.final_response.model_dump() if result.final_response else None}
-    (root / 'report.json').write_text(json.dumps(report, indent=2))
+    result = runner.run(
+        RunRequest(
+            username="live_smoke",
+            workspace=str(workspace),
+            response_schema=json.dumps(schema),
+            prompt=prompt,
+        ),
+        emit=emit,
+        wait_for_input=no_input,
+        is_cancelled=lambda: time.monotonic() - started > 1200,
+    )
+    state = TaskBoard(workspace, result.session_id).verify()
+    artifacts = sorted(workspace.rglob("README.md"))
+    expected_existing = [path for path in expected_paths if (workspace / path).is_file()]
+    passed = (
+        result.status == "completed"
+        and state["remaining"] == 0
+        and len(artifacts) == args.files
+        and len(expected_existing) == args.files
+        and result.final_response is not None
+        and result.final_response.readme_count == args.files
+        and set(expected_paths).issubset(set(result.final_response.artifacts))
+        and "tool.completed" in events
+    )
+    report = {
+        "passed": passed,
+        "status": result.status,
+        "error": result.error,
+        "model": runner.config["orchestrator_agent"]["model"],
+        "api_mode": runner.config.get("llm", {}).get("api_mode", "chat_completions"),
+        "coverage": state,
+        "artifact_count": len(artifacts),
+        "expected_paths": expected_paths,
+        "workspace": str(workspace),
+        "elapsed_seconds": round(time.monotonic() - started, 1),
+        "final_response": result.final_response.model_dump() if result.final_response else None,
+    }
+    (root / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2), flush=True)
     return 0 if passed else 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     raise SystemExit(main())
